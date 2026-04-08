@@ -5,7 +5,11 @@
 # =============================
 # Get a free API key at: https://openweathermap.org/api
 # Free tier: 1000 calls/day, 5-day forecast in 3-hour intervals
-WEATHER_API_KEY = "18332530c13cf2c239efec09dfd44588"
+try:
+    import streamlit as st
+    WEATHER_API_KEY = st.secrets["WEATHER_API_KEY"]
+except:
+    WEATHER_API_KEY = "YOUR_API_KEY_HERE"
 
 # =============================
 # Athlete Profile
