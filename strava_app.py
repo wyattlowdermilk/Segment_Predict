@@ -924,8 +924,8 @@ def main():
         time_range = st.slider(
             "Estimated time (seconds)",
             min_value=10,
-            max_value=600,
-            value=(10, 600),
+            max_value=1800,
+            value=(10, 1800),
             step=10,
             help="Filter segments by your estimated completion time",
         )
