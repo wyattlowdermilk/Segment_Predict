@@ -638,6 +638,8 @@ REGIONS = {
     "Seattle, WA": {"lat": 47.6062, "lon": -122.3321},
     "Orcas Island, WA": {"lat": 48.6543, "lon": -122.9060},
     "Boulder, CO": {"lat": 40.0150, "lon": -105.2705},
+    "Salt Lake City, UT": {"lat": 40.7608, "lon": -111.8910},
+    "Weddington, NC": {"lat": 34.9901, "lon": -80.7812},
 }
 
 
