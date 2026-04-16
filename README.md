@@ -1,5 +1,7 @@
 # Cycling Segment Predictor
 
+https://segment-predict.streamlit.app/
+
 A physics-based Python tool that estimates your time on cycling segments by combining:
 - **Segment data** (distance, elevation, gradient)
 - **7-day weather forecasts** (temperature, wind, rain)
