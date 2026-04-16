@@ -1,0 +1,46 @@
+# Requests database (created by app, user-specific)
+requests.db
+*.db-journal
+
+# Old database files
+strava.db
+strava - Copy.db
+
+# Config with secrets
+config.py
+.streamlit/secrets.toml
+
+# OAuth tokens
+tokens.json
+
+# Generated data
+seattle_segments.json
+rejected_ids.json
+
+# Binaries
+msedgedriver.exe
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Archives and WIP folders
+archiving */
+OlderScripts/
+Optimizing Power WIP/
+ScreenCaps/
+Get_Code
+Link to github for screen scraper
+VerticalLayoutApp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*_pkce_verifier.json
