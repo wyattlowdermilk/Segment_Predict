@@ -2368,19 +2368,29 @@ def main():
                                 entrance_speed,
                                 weather_conditions_1b,
                                 DB_PATH,
-                                top_n=3,
+                                top_n=15,
                                 gradient_range=gradient_range,
                                 time_range=time_range,
                                 min_athletes=min_athletes,
                             )
                         st.session_state["_tab1b_cache_key"] = _tab1b_cache_key
                         st.session_state["_tab1b_segments"] = top_segments_1b
+                        # Reset show count when results change
+                        for k in list(st.session_state.keys()):
+                            if k.startswith("_tab1b_show_count_"):
+                                del st.session_state[k]
 
                     top_segments_1b = st.session_state["_tab1b_segments"]
 
                 # Render styled segment cards
                 if top_segments_1b:
-                    for seg in top_segments_1b:
+                    # Track how many to show (3 at a time)
+                    _show_key = f"_tab1b_show_count_{selected_day_offset}"
+                    if _show_key not in st.session_state:
+                        st.session_state[_show_key] = 3
+                    _show_count = min(st.session_state[_show_key], len(top_segments_1b))
+
+                    for seg in top_segments_1b[:_show_count]:
                         strava_url = (
                             f"https://www.strava.com/segments/{seg['segment_id']}"
                         )
@@ -2640,6 +2650,16 @@ def main():
                             if fav_checked != is_fav:
                                 toggle_favorite(sb, str(user.id), seg_id_fav)
                                 st.rerun()
+
+                    # Show More button (if more segments available)
+                    _total_available = len(top_segments_1b)
+                    if _show_count < _total_available:
+                        _remaining = _total_available - _show_count
+                        _next_batch = min(3, _remaining)
+                        _label = f"Show {_next_batch} more segment{'s' if _next_batch > 1 else ''}"
+                        if st.button(_label, key=f"_show_more_{selected_day_offset}"):
+                            st.session_state[_show_key] = _show_count + 3
+                            st.rerun()
 
                     # Simulator link below all cards
                     st.markdown(
@@ -3073,11 +3093,14 @@ def main():
             st.session_state["_tab2_segment_id"] = segment_id
             st.session_state["tab2_power"] = int(natural_power)
 
-        # === Two-column layout: Adjust Parameters | Results ===
-        col_params, col_results = st.columns(2)
+        # === Three-column layout: Parameters | Results | Elevation Profile ===
+        # Load elevation data early so we can show it in the right column
+        elev_points = get_segment_elevation_profile(DB_PATH, int(segment_id))
+
+        col_params, col_results, col_elev = st.columns([3, 2, 4])
 
         with col_params:
-            st.caption("**Adjust Parameters for Basic Model**")
+            st.caption("**Adjust Parameters**")
 
             target_power = st.slider(
                 "⚡ Power (W)",
@@ -3141,10 +3164,6 @@ def main():
                 )
 
             st.caption(power_note)
-            st.caption(
-                "Basic Model uses constant power at the average gradient — "
-                "see Advanced Gradient Analysis below for variable-grade optimization."
-            )
 
         # Run simulation
         temp_c = 15  # Use standard temperature
@@ -3175,7 +3194,7 @@ def main():
         )
 
         with col_results:
-            st.caption("**Basic Model Results**")
+            st.caption("**Results**")
 
             # Estimated time with KOM delta
             your_time = result["total_time"]
@@ -3196,226 +3215,9 @@ def main():
 
             st.metric("⚡ Power", f"{target_power:.0f} W")
 
-        # =============================================
-        # 7-Day Segment Forecast
-        # =============================================
-        st.caption("**📅 7-Day Forecast with Basic Model**")
-
-        seg_bearing = calculate_segment_bearing(
-            segment_data["start_lat"],
-            segment_data["start_lng"],
-            segment_data["end_lat"],
-            segment_data["end_lng"],
-        )
-
-        _today_key = datetime.now().strftime("%Y-%m-%d")
-        forecasts_tab2 = _fetch_forecast_cached(
-            api_key, center_lat, center_lon, _today_key
-        )
-
-        forecast_rows = []
-        for day_offset in range(8):
-            target_date = datetime.now() + timedelta(days=day_offset)
-            afternoon_time = target_date.replace(
-                hour=14, minute=0, second=0, microsecond=0
-            )
-
-            closest_fc = min(
-                forecasts_tab2,
-                key=lambda f: abs((f["datetime"] - afternoon_time).total_seconds()),
-            )
-
-            wind_angle, tailwind_pct = calculate_wind_angle(
-                seg_bearing, closest_fc["wind_deg"]
-            )
-
-            day_weather = {
-                "temp_c": closest_fc["temp_c"],
-                "pressure_hpa": closest_fc["pressure_hpa"],
-                "wind_speed_ms": closest_fc["wind_speed_ms"],
-                "wind_angle": wind_angle,
-            }
-
-            day_result = estimate_time_with_entrance_speed(
-                segment_dict, athlete, entrance_speed_t2, day_weather
-            )
-            day_time = day_result["total_time"]
-            day_power = day_result["sustainable_power"]
-
-            day_kom_power = None
-            if kom_time:
-                lo, hi = 50, 1200
-                for _ in range(20):
-                    mid = (lo + hi) / 2
-                    r = estimate_time_with_entrance_speed(
-                        segment_dict,
-                        athlete,
-                        entrance_speed_t2,
-                        day_weather,
-                        target_power=mid,
-                    )
-                    if abs(r["total_time"] - kom_time) < 0.5:
-                        day_kom_power = int(mid)
-                        break
-                    elif r["total_time"] > kom_time:
-                        lo = mid
-                    else:
-                        hi = mid
-                else:
-                    # Converged but didn't hit 0.5s tolerance
-                    if lo < 1100:
-                        day_kom_power = int(mid)
-
-            if day_offset == 0:
-                day_label = "Today"
-            elif day_offset == 1:
-                day_label = "Tomorrow"
-            else:
-                day_label = target_date.strftime("%a %b %d")
-
-            wind_cardinal = wind_direction_to_cardinal(closest_fc["wind_deg"])
-            if use_metric:
-                wind_speed_display = closest_fc["wind_speed_ms"] * 3.6
-                wind_unit = "km/h"
-            else:
-                wind_speed_display = closest_fc["wind_speed_ms"] * 2.237
-                wind_unit = "mph"
-
-            gust_ms = closest_fc.get("wind_gust_ms") or closest_fc.get("wind_gust") or 0
-            if use_metric:
-                gust_display = f"{gust_ms * 3.6:.0f} {wind_unit}" if gust_ms else "—"
-                temp_display = f"{closest_fc['temp_c']:.0f}°C"
-            else:
-                gust_display = f"{gust_ms * 2.237:.0f} {wind_unit}" if gust_ms else "—"
-                temp_display = f"{closest_fc['temp_c'] * 9 / 5 + 32:.0f}°F"
-
-            forecast_rows.append(
-                {
-                    "Day": day_label,
-                    "Temp": temp_display,
-                    "Wind (2pm)": f"{wind_speed_display:.0f} {wind_unit} {wind_cardinal}",
-                    "Gust": gust_display,
-                    "Effect": f"💨 {tailwind_pct:.0f}% tailwind",
-                    "Est. Time (Basic Model)": format_time(day_time),
-                    "Power, W (Basic Model)": f"{day_power:.0f}",
-                    "KOM Power (Basic Model)": (
-                        f"{day_kom_power}" if day_kom_power else "—"
-                    ),
-                }
-            )
-
-        forecast_df = pd.DataFrame(forecast_rows)
-
-        # On mobile, move Effect to the last column so the important
-        # time/power columns are visible without scrolling
-        if IS_MOBILE:
-            cols = [c for c in forecast_df.columns if c != "Effect"] + ["Effect"]
-            forecast_df = forecast_df[cols]
-
-        best_day_label = min(forecast_rows, key=lambda r: r["Est. Time (Basic Model)"])[
-            "Day"
-        ]
-        forecast_df["Day"] = forecast_df["Day"].apply(
-            lambda d: f"{d} (Best)" if d == best_day_label else d
-        )
-
-        def bold_best_day(row):
-            if "(Best)" in str(row["Day"]):
-                return ["font-weight: bold"] * len(row)
-            return [""] * len(row)
-
-        st.dataframe(
-            forecast_df.style.apply(bold_best_day, axis=1),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Day": st.column_config.TextColumn(width="small"),
-            },
-        )
-
-        # =============================================
-        # Leaderboard (below forecast)
-        # =============================================
-        with st.expander("🏆 Full Leaderboard", expanded=False):
-            leaderboard_data = _get_leaderboard(DB_PATH, int(segment_id), 20)
-            if leaderboard_data:
-                your_time = result["total_time"]
-                lb_df = pd.DataFrame(
-                    leaderboard_data[:10],
-                    columns=["_rank", "Athlete", "_time_s", "Power (W)", "Date"],
-                )
-                lb_df["Time"] = lb_df["_time_s"].apply(format_time)
-                lb_df["Power (W)"] = lb_df["Power (W)"].apply(
-                    lambda x: f"{x:.0f}" if pd.notna(x) and x else "—"
-                )
-                lb_df["Date"] = lb_df["Date"].fillna("—")
-
-                max_lb_time = max(row[2] for row in leaderboard_data[:10] if row[2])
-                is_on_board = your_time <= max_lb_time
-                if is_on_board:
-                    your_row = pd.DataFrame(
-                        [
-                            {
-                                "_rank": 0,
-                                "Athlete": "YOU",
-                                "_time_s": your_time,
-                                "Time": format_time(your_time),
-                                "Power (W)": f"{target_power:.0f}",
-                                "Date": "—",
-                            }
-                        ]
-                    )
-                    combined = pd.concat([lb_df, your_row])
-                else:
-                    combined = lb_df.copy()
-
-                combined = combined.sort_values("_time_s").reset_index(drop=True)
-                combined["#"] = range(1, len(combined) + 1)
-                combined = combined[["#", "Athlete", "Date", "Time", "Power (W)"]]
-
-                def highlight_you(row):
-                    return [
-                        (
-                            "background-color: #2563EB22; font-weight: bold"
-                            if row["Athlete"] == "YOU"
-                            else ""
-                        )
-                        for _ in row
-                    ]
-
-                st.dataframe(
-                    combined.style.apply(highlight_you, axis=1),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "#": st.column_config.NumberColumn(width="small"),
-                    },
-                )
-            else:
-                st.caption("No leaderboard data available.")
-
-        # =============================================
-        # Advanced Gradient Analysis (formerly Tab 3)
-        # =============================================
-        st.markdown("---")
-
-        # Load cleaned elevation profile
-        elev_points = get_segment_elevation_profile(DB_PATH, int(segment_id))
-
-        if len(elev_points) < 2:
-            st.warning(
-                "No cleaned elevation data available for this segment in `clean_seg_points`."
-            )
-        else:
-            # Convert to gradient sections using pre-computed grade_pct
-            gradient_sections = elevation_to_gradient_sections(elev_points)
-
-            if len(gradient_sections) == 0:
-                st.warning("Could not compute gradient sections from elevation data.")
-            else:
-                # ---- Elevation Profile Plot ----
-                st.subheader("Elevation Profile")
-
+        with col_elev:
+            st.caption("**Elevation Profile**")
+            if len(elev_points) >= 2:
                 elev_dist = [p[0] for p in elev_points]
                 elev_vals = [p[1] for p in elev_points]
                 elev_grades = [p[2] if p[2] is not None else 0.0 for p in elev_points]
@@ -3443,12 +3245,10 @@ def main():
                     )
                     x_col, y_col = "Distance (mi)", "Elevation (ft)"
 
-                # Compute Y-axis domain with padding
                 y_vals = elev_chart_data[y_col]
-                y_min = y_vals.min()
-                y_max = y_vals.max()
+                y_min, y_max = y_vals.min(), y_vals.max()
                 y_range = max(y_max - y_min, 1)
-                y_pad = y_range * 0.08  # 8% padding
+                y_pad = y_range * 0.08
                 y_domain = [float(y_min - y_pad), float(y_max + y_pad)]
 
                 elev_chart = (
@@ -3467,43 +3267,103 @@ def main():
                             alt.Tooltip("Grade (%)", format=".1f"),
                         ],
                     )
+                    .properties(height=280)
                     .interactive()
                 )
                 st.altair_chart(elev_chart, use_container_width=True)
+            else:
+                st.caption("No elevation data available")
 
-                # Show gradient section summary
-                with st.expander(
-                    f"Gradient Sections ({len(gradient_sections)} sections)",
-                    expanded=False,
-                ):
-                    sec_rows = []
-                    cum_dist = 0.0
-                    for i, (grade, dist_mi) in enumerate(gradient_sections):
-                        dist_m = dist_mi * MILES_TO_METERS
-                        if use_metric:
-                            sec_rows.append(
-                                {
-                                    "#": i + 1,
-                                    "Grade (%)": f"{grade:.1f}",
-                                    "Distance": f"{dist_m:.0f} m",
-                                    "Cumulative": f"{cum_dist + dist_m:.0f} m",
-                                }
+        # =============================================
+        # Advanced Gradient Analysis
+        # =============================================
+        st.markdown("---")
+
+        if len(elev_points) < 2:
+            st.warning(
+                "No cleaned elevation data available for this segment in `clean_seg_points`."
+            )
+        else:
+            # Convert to gradient sections using pre-computed grade_pct
+            gradient_sections = elevation_to_gradient_sections(elev_points)
+
+            if len(gradient_sections) == 0:
+                st.warning("Could not compute gradient sections from elevation data.")
+            else:
+                elev_dist = [p[0] for p in elev_points]
+                elev_vals = [p[1] for p in elev_points]
+                elev_grades = [p[2] if p[2] is not None else 0.0 for p in elev_points]
+
+                # Leaderboard
+                with st.expander("🏆 Full Leaderboard", expanded=False):
+                    leaderboard_data = _get_leaderboard(DB_PATH, int(segment_id), 20)
+                    if leaderboard_data:
+                        your_time = result["total_time"]
+                        lb_df = pd.DataFrame(
+                            leaderboard_data[:10],
+                            columns=[
+                                "_rank",
+                                "Athlete",
+                                "_time_s",
+                                "Power (W)",
+                                "Date",
+                            ],
+                        )
+                        lb_df["Time"] = lb_df["_time_s"].apply(format_time)
+                        lb_df["Power (W)"] = lb_df["Power (W)"].apply(
+                            lambda x: f"{x:.0f}" if pd.notna(x) and x else "—"
+                        )
+                        lb_df["Date"] = lb_df["Date"].fillna("—")
+
+                        max_lb_time = max(
+                            row[2] for row in leaderboard_data[:10] if row[2]
+                        )
+                        is_on_board = your_time <= max_lb_time
+                        if is_on_board:
+                            your_row = pd.DataFrame(
+                                [
+                                    {
+                                        "_rank": 0,
+                                        "Athlete": "YOU",
+                                        "_time_s": your_time,
+                                        "Time": format_time(your_time),
+                                        "Power (W)": f"{target_power:.0f}",
+                                        "Date": "—",
+                                    }
+                                ]
                             )
+                            combined = pd.concat([lb_df, your_row])
                         else:
-                            sec_rows.append(
-                                {
-                                    "#": i + 1,
-                                    "Grade (%)": f"{grade:.1f}",
-                                    "Distance": f"{dist_mi:.3f} mi",
-                                    "Cumulative": f"{(cum_dist + dist_m) / MILES_TO_METERS:.3f} mi",
-                                }
-                            )
-                        cum_dist += dist_m
-                    st.dataframe(
-                        pd.DataFrame(sec_rows),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                            combined = lb_df.copy()
+
+                        combined = combined.sort_values("_time_s").reset_index(
+                            drop=True
+                        )
+                        combined["#"] = range(1, len(combined) + 1)
+                        combined = combined[
+                            ["#", "Athlete", "Date", "Time", "Power (W)"]
+                        ]
+
+                        def highlight_you(row):
+                            return [
+                                (
+                                    "background-color: #2563EB22; font-weight: bold"
+                                    if row["Athlete"] == "YOU"
+                                    else ""
+                                )
+                                for _ in row
+                            ]
+
+                        st.dataframe(
+                            combined.style.apply(highlight_you, axis=1),
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "#": st.column_config.NumberColumn(width="small"),
+                            },
+                        )
+                    else:
+                        st.caption("No leaderboard data available.")
 
                 st.markdown("---")
 
@@ -3526,21 +3386,31 @@ def main():
                     st.session_state["_run_optimizer"] = False
                     st.session_state.pop("_opt_cache_key", None)
                     st.session_state.pop("_opt_results", None)
+                    st.session_state.pop("_opt_forecast_data", None)
 
                 # --- Optimize button ---
-                col_btn, col_info = st.columns([1, 3])
-                with col_btn:
-                    if st.button("⚡ Optimize!", type="primary", key="optimize_btn"):
-                        st.session_state["_run_optimizer"] = True
-                with col_info:
-                    if not st.session_state.get("_run_optimizer"):
-                        st.caption(
-                            f"Analyzes {len(gradient_sections)} gradient sections to find optimal power distribution"
-                        )
+                _has_cached_results = (
+                    "_opt_results" in st.session_state
+                    and st.session_state.get("_opt_results", {}).get("success", False)
+                )
+
+                # Only show the button if optimizer hasn't been run yet
+                if not _has_cached_results:
+                    col_btn, col_info = st.columns([1, 3])
+                    with col_btn:
+                        if st.button(
+                            "⚡ Optimize!", type="primary", key="optimize_btn"
+                        ):
+                            st.session_state["_run_optimizer"] = True
+                    with col_info:
+                        if not st.session_state.get("_run_optimizer"):
+                            st.caption(
+                                f"Analyzes {len(gradient_sections)} gradient sections to find optimal power distribution"
+                            )
 
                 optimizer_active = st.session_state.get("_run_optimizer", False)
 
-                if not optimizer_active:
+                if not optimizer_active and not _has_cached_results:
                     # --- Greyed-out placeholder content ---
                     st.markdown(
                         """
@@ -3579,37 +3449,18 @@ def main():
                     )
                     st.altair_chart(placeholder_chart, use_container_width=True)
 
-                    # Placeholder forecast table
-                    st.subheader("📅 7-Day Forecast with Dynamic Gradient")
-                    placeholder_rows = []
-                    for i in range(4):
-                        day = ["Today", "Tomorrow", "Wed", "Thu"][i]
-                        placeholder_rows.append(
-                            {
-                                "Day": day,
-                                "Optimized Power Time": "—:——",
-                                "Even Power Time": "—:——",
-                                "Even Power (W)": "—",
-                            }
-                        )
-                    st.dataframe(
-                        pd.DataFrame(placeholder_rows),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
                     st.markdown("</div>", unsafe_allow_html=True)
 
-                    # Overlay message — large and prominent
+                    # Overlay message
                     st.markdown(
                         """
-                        <div style="text-align: center; margin-top: -380px; margin-bottom: 330px; position: relative; z-index: 10;">
+                        <div style="text-align: center; margin-top: -300px; margin-bottom: 250px; position: relative; z-index: 10;">
                             <div style="background: rgba(14,17,23,0.92); display: inline-block; padding: 1.5rem 2.5rem; border-radius: 12px; border: 1px solid #444; box-shadow: 0 4px 20px rgba(0,0,0,0.5);">
                                 <p style="font-size: 1.4rem; color: #aaa; margin: 0 0 0.5rem 0;">
                                     Press <strong style="color: #f0f0f0;">⚡ Optimize!</strong> above
                                 </p>
                                 <p style="font-size: 0.95rem; color: #666; margin: 0;">
-                                    to see optimized power distribution and 7-day forecast for this segment
+                                    to see optimized power distribution for this segment
                                 </p>
                             </div>
                         </div>
@@ -3933,238 +3784,314 @@ def main():
                         st.altair_chart(power_chart, use_container_width=True)
 
                         # =============================================
-                        # 7-Day Forecast with Optimizer
+                        # Compute optimizer forecast data for the main table
                         # =============================================
-                        st.markdown("---")
-                        st.subheader("📅 7-Day Forecast with Dynamic Gradient")
+                        if "_opt_forecast_data" not in st.session_state:
+                            with st.status(
+                                "Computing optimized 7-day forecast...", expanded=False
+                            ) as _opt_status:
+                                seg_bearing_opt = calculate_segment_bearing(
+                                    segment_data["start_lat"],
+                                    segment_data["start_lng"],
+                                    segment_data["end_lat"],
+                                    segment_data["end_lng"],
+                                )
 
-                        seg_bearing_opt = calculate_segment_bearing(
-                            segment_data["start_lat"],
-                            segment_data["start_lng"],
-                            segment_data["end_lat"],
-                            segment_data["end_lng"],
-                        )
+                                _today_key_opt = datetime.now().strftime("%Y-%m-%d")
+                                forecasts_opt = _fetch_forecast_cached(
+                                    api_key, center_lat, center_lon, _today_key_opt
+                                )
 
-                        _today_key_opt = datetime.now().strftime("%Y-%m-%d")
-                        forecasts_opt = _fetch_forecast_cached(
-                            api_key, center_lat, center_lon, _today_key_opt
-                        )
-
-                        segment_dict_opt = {
-                            "distance_m": segment_data["distance_m"],
-                            "avg_grade": segment_data["avg_grade"],
-                            "elevation_high_m": segment_data["elevation_gain_m"],
-                            "elevation_low_m": 0,
-                        }
-
-                        forecast_rows_opt = []
-                        for day_offset in range(8):
-                            target_date = datetime.now() + timedelta(days=day_offset)
-                            afternoon_time = target_date.replace(
-                                hour=14, minute=0, second=0, microsecond=0
-                            )
-
-                            closest_fc = min(
-                                forecasts_opt,
-                                key=lambda f: abs(
-                                    (f["datetime"] - afternoon_time).total_seconds()
-                                ),
-                            )
-
-                            wind_angle_fc, tailwind_pct_fc = calculate_wind_angle(
-                                seg_bearing_opt, closest_fc["wind_deg"]
-                            )
-
-                            day_weather = {
-                                "temp_c": closest_fc["temp_c"],
-                                "pressure_hpa": closest_fc["pressure_hpa"],
-                                "wind_speed_ms": closest_fc["wind_speed_ms"],
-                                "wind_angle": wind_angle_fc,
-                            }
-
-                            # Dynamic time (variable gradient from clean elevation)
-                            day_air_density = compute_air_density_from_weather(
-                                day_weather, avg_elevation
-                            )
-                            # Compute effective headwind for this day's forecast
-                            _day_wind_angle_rad = math.radians(
-                                day_weather["wind_angle"]
-                            )
-                            day_effective_headwind = day_weather[
-                                "wind_speed_ms"
-                            ] * math.cos(_day_wind_angle_rad)
-                            try:
-                                day_even_power = opt_athlete.max_power_for_duration(
-                                    max(
-                                        30,
-                                        segment_total_distance(sections_opt) / 6.0,
+                                opt_forecast_data = []
+                                for day_offset in range(8):
+                                    target_date = datetime.now() + timedelta(
+                                        days=day_offset
                                     )
-                                )
-                                day_even_sim = optimizer_simulate_segment(
-                                    sections_opt,
-                                    [day_even_power] * len(sections_opt),
-                                    opt_athlete,
-                                    entrance_speed_mph=entrance_speed_t2,
-                                    air_density=day_air_density,
-                                    wind_speed_ms=day_effective_headwind,
-                                )
-                                day_refined_power = opt_athlete.max_power_for_duration(
-                                    day_even_sim["total_time"]
-                                )
-                                day_even_sim = optimizer_simulate_segment(
-                                    sections_opt,
-                                    [day_refined_power] * len(sections_opt),
-                                    opt_athlete,
-                                    entrance_speed_mph=entrance_speed_t2,
-                                    air_density=day_air_density,
-                                    wind_speed_ms=day_effective_headwind,
-                                )
-                                day_time_dynamic = day_even_sim["total_time"]
-                            except Exception:
-                                day_time_dynamic = 9999
+                                    afternoon_time = target_date.replace(
+                                        hour=14, minute=0, second=0, microsecond=0
+                                    )
 
-                            # Optimized time (variable gradient + optimal pacing)
-                            try:
-                                day_opt_sim = optimize_power_profile(
-                                    sections_opt,
-                                    opt_athlete,
-                                    entrance_speed_mph=entrance_speed_t2,
-                                    air_density=day_air_density,
-                                    wind_speed_ms=day_effective_headwind,
-                                )
-                                day_time_optimized = day_opt_sim["total_time"]
-                            except Exception:
-                                day_time_optimized = day_time_dynamic
+                                    closest_fc = min(
+                                        forecasts_opt,
+                                        key=lambda f: abs(
+                                            (
+                                                f["datetime"] - afternoon_time
+                                            ).total_seconds()
+                                        ),
+                                    )
 
-                            # KOM even-power search (even power needed to match KOM time)
-                            day_kom_power_opt = None
-                            if kom_time:
-                                lo, hi = 50, 1200
-                                for _ in range(20):
-                                    mid = (lo + hi) / 2
+                                    wind_angle_fc, tailwind_pct_fc = (
+                                        calculate_wind_angle(
+                                            seg_bearing_opt, closest_fc["wind_deg"]
+                                        )
+                                    )
+
+                                    day_weather = {
+                                        "temp_c": closest_fc["temp_c"],
+                                        "pressure_hpa": closest_fc["pressure_hpa"],
+                                        "wind_speed_ms": closest_fc["wind_speed_ms"],
+                                        "wind_angle": wind_angle_fc,
+                                    }
+
+                                    avg_elevation = (
+                                        (elev_vals[0] + elev_vals[-1]) / 2
+                                        if elev_vals
+                                        else 0
+                                    )
+                                    day_air_density = compute_air_density_from_weather(
+                                        day_weather, avg_elevation
+                                    )
+                                    _day_wind_angle_rad = math.radians(
+                                        day_weather["wind_angle"]
+                                    )
+                                    day_effective_headwind = day_weather[
+                                        "wind_speed_ms"
+                                    ] * math.cos(_day_wind_angle_rad)
+
+                                    # Even power time
                                     try:
-                                        kom_even_sim = optimizer_simulate_segment(
+                                        day_even_power = (
+                                            opt_athlete.max_power_for_duration(
+                                                max(
+                                                    30,
+                                                    segment_total_distance(sections_opt)
+                                                    / 6.0,
+                                                )
+                                            )
+                                        )
+                                        day_even_sim = optimizer_simulate_segment(
                                             sections_opt,
-                                            [mid] * len(sections_opt),
+                                            [day_even_power] * len(sections_opt),
                                             opt_athlete,
                                             entrance_speed_mph=entrance_speed_t2,
                                             air_density=day_air_density,
                                             wind_speed_ms=day_effective_headwind,
                                         )
-                                        sim_time = kom_even_sim["total_time"]
-                                    except Exception:
-                                        r = estimate_time_with_entrance_speed(
-                                            segment_dict_opt,
-                                            athlete,
-                                            entrance_speed_t2,
-                                            day_weather,
-                                            target_power=mid,
+                                        day_refined_power = (
+                                            opt_athlete.max_power_for_duration(
+                                                day_even_sim["total_time"]
+                                            )
                                         )
-                                        sim_time = r["total_time"]
-                                    if abs(sim_time - kom_time) < 0.5:
-                                        day_kom_power_opt = int(mid)
-                                        break
-                                    elif sim_time > kom_time:
-                                        lo = mid
-                                    else:
-                                        hi = mid
-                                else:
-                                    # Only report if converged within reasonable range
-                                    if lo < 1100:
-                                        day_kom_power_opt = int(mid)
+                                        day_even_sim = optimizer_simulate_segment(
+                                            sections_opt,
+                                            [day_refined_power] * len(sections_opt),
+                                            opt_athlete,
+                                            entrance_speed_mph=entrance_speed_t2,
+                                            air_density=day_air_density,
+                                            wind_speed_ms=day_effective_headwind,
+                                        )
+                                        day_time_dynamic = day_even_sim["total_time"]
+                                    except Exception:
+                                        day_time_dynamic = 9999
+                                        day_refined_power = 0
 
-                            if day_offset == 0:
-                                day_label = "Today"
-                            elif day_offset == 1:
-                                day_label = "Tomorrow"
-                            else:
-                                day_label = target_date.strftime("%a %b %d")
+                                    # Optimized time
+                                    try:
+                                        day_opt_sim = optimize_power_profile(
+                                            sections_opt,
+                                            opt_athlete,
+                                            entrance_speed_mph=entrance_speed_t2,
+                                            air_density=day_air_density,
+                                            wind_speed_ms=day_effective_headwind,
+                                        )
+                                        day_time_optimized = day_opt_sim["total_time"]
+                                    except Exception:
+                                        day_time_optimized = day_time_dynamic
 
-                            wind_cardinal = wind_direction_to_cardinal(
-                                closest_fc["wind_deg"]
-                            )
-                            if use_metric:
-                                wind_speed_display = closest_fc["wind_speed_ms"] * 3.6
-                                wind_unit = "km/h"
-                            else:
-                                wind_speed_display = closest_fc["wind_speed_ms"] * 2.237
-                                wind_unit = "mph"
+                                    opt_forecast_data.append(
+                                        {
+                                            "opt_time": format_time(day_time_optimized),
+                                            "even_time": format_time(day_time_dynamic),
+                                            "even_power": (
+                                                f"{day_refined_power:.0f}"
+                                                if day_refined_power > 0
+                                                else "—"
+                                            ),
+                                        }
+                                    )
 
-                            gust_ms = (
-                                closest_fc.get("wind_gust_ms")
-                                or closest_fc.get("wind_gust")
-                                or 0
-                            )
-                            if use_metric:
-                                gust_display = (
-                                    f"{gust_ms * 3.6:.0f} {wind_unit}"
-                                    if gust_ms
-                                    else "—"
-                                )
-                                temp_display = f"{closest_fc['temp_c']:.0f}°C"
-                            else:
-                                gust_display = (
-                                    f"{gust_ms * 2.237:.0f} {wind_unit}"
-                                    if gust_ms
-                                    else "—"
-                                )
-                                temp_display = (
-                                    f"{closest_fc['temp_c'] * 9 / 5 + 32:.0f}°F"
+                                _opt_status.update(
+                                    label="✅ Optimized forecast complete",
+                                    state="complete",
                                 )
 
-                            forecast_rows_opt.append(
-                                {
-                                    "Day": day_label,
-                                    "Temp": temp_display,
-                                    "Wind (2pm)": f"{wind_speed_display:.0f} {wind_unit} {wind_cardinal}",
-                                    "Gust": gust_display,
-                                    "Effect": f"💨 {tailwind_pct_fc:.0f}% tailwind",
-                                    "Optimized Power Time": format_time(
-                                        day_time_optimized
-                                    ),
-                                    "Even Power Time": format_time(day_time_dynamic),
-                                    "Even Power (W)": f"{day_refined_power:.0f}",
-                                    "KOM Even Power": (
-                                        f"{day_kom_power_opt}"
-                                        if day_kom_power_opt
-                                        else "—"
-                                    ),
-                                }
-                            )
+                            st.session_state["_opt_forecast_data"] = opt_forecast_data
+                            st.rerun()
 
-                        forecast_df_opt = pd.DataFrame(forecast_rows_opt)
+        # =============================================
+        # 7-Day Segment Forecast
+        # =============================================
+        st.caption("**📅 7-Day Segment Forecast**")
 
-                        # On mobile, move Effect to the last column
-                        if IS_MOBILE:
-                            cols_opt = [
-                                c for c in forecast_df_opt.columns if c != "Effect"
-                            ] + ["Effect"]
-                            forecast_df_opt = forecast_df_opt[cols_opt]
+        # Show computing note if optimizer is active but forecast data not ready
+        _optimizer_active_check = st.session_state.get("_run_optimizer", False)
+        _opt_forecast_ready = st.session_state.get("_opt_forecast_data") is not None
+        if _optimizer_active_check and not _opt_forecast_ready:
+            st.markdown(
+                '<div style="display:flex; align-items:center; gap:8px; padding:8px 12px; '
+                'background:#1e293b; border:1px solid #334155; border-radius:8px; margin-bottom:12px;">'
+                '<div style="width:16px; height:16px; border:2px solid #3b82f6; border-top-color:transparent; '
+                'border-radius:50%; animation:spin 1s linear infinite;"></div>'
+                '<span style="color:#94a3b8; font-size:0.85em;">Computing optimized forecast — optimizer columns will update shortly</span>'
+                "</div>"
+                "<style>@keyframes spin { to { transform: rotate(360deg); } }</style>",
+                unsafe_allow_html=True,
+            )
 
-                        best_day_opt = min(
-                            forecast_rows_opt, key=lambda r: r["Optimized Power Time"]
-                        )["Day"]
-                        forecast_df_opt["Day"] = forecast_df_opt["Day"].apply(
-                            lambda d: f"{d} (Best)" if d == best_day_opt else d
-                        )
+        seg_bearing = calculate_segment_bearing(
+            segment_data["start_lat"],
+            segment_data["start_lng"],
+            segment_data["end_lat"],
+            segment_data["end_lng"],
+        )
 
-                        def bold_best_opt(row):
-                            if "(Best)" in str(row["Day"]):
-                                return ["font-weight: bold"] * len(row)
-                            return [""] * len(row)
+        _today_key = datetime.now().strftime("%Y-%m-%d")
+        forecasts_tab2 = _fetch_forecast_cached(
+            api_key, center_lat, center_lon, _today_key
+        )
 
-                        st.dataframe(
-                            forecast_df_opt.style.apply(bold_best_opt, axis=1),
-                            use_container_width=True,
-                            hide_index=True,
-                            column_config={
-                                "Day": st.column_config.TextColumn(width="small"),
-                            },
-                        )
+        forecast_rows = []
+        for day_offset in range(8):
+            target_date = datetime.now() + timedelta(days=day_offset)
+            afternoon_time = target_date.replace(
+                hour=14, minute=0, second=0, microsecond=0
+            )
 
-                        st.caption(
-                            "**Optimized Power Time**: optimal pacing across real gradient sections | **Even Power Time**: constant power, variable grade | **Even Power (W)**: watts for even-power effort | **KOM Even Power**: even watts needed to match KOM"
-                        )
+            closest_fc = min(
+                forecasts_tab2,
+                key=lambda f: abs((f["datetime"] - afternoon_time).total_seconds()),
+            )
+
+            wind_angle, tailwind_pct = calculate_wind_angle(
+                seg_bearing, closest_fc["wind_deg"]
+            )
+
+            day_weather = {
+                "temp_c": closest_fc["temp_c"],
+                "pressure_hpa": closest_fc["pressure_hpa"],
+                "wind_speed_ms": closest_fc["wind_speed_ms"],
+                "wind_angle": wind_angle,
+            }
+
+            day_result = estimate_time_with_entrance_speed(
+                segment_dict, athlete, entrance_speed_t2, day_weather
+            )
+            day_time = day_result["total_time"]
+            day_power = day_result["sustainable_power"]
+
+            day_kom_power = None
+            if kom_time:
+                lo, hi = 50, 1200
+                for _ in range(20):
+                    mid = (lo + hi) / 2
+                    r = estimate_time_with_entrance_speed(
+                        segment_dict,
+                        athlete,
+                        entrance_speed_t2,
+                        day_weather,
+                        target_power=mid,
+                    )
+                    if abs(r["total_time"] - kom_time) < 0.5:
+                        day_kom_power = int(mid)
+                        break
+                    elif r["total_time"] > kom_time:
+                        lo = mid
+                    else:
+                        hi = mid
+                else:
+                    # Converged but didn't hit 0.5s tolerance
+                    if lo < 1100:
+                        day_kom_power = int(mid)
+
+            if day_offset == 0:
+                day_label = "Today"
+            elif day_offset == 1:
+                day_label = "Tomorrow"
+            else:
+                day_label = target_date.strftime("%a %b %d")
+
+            wind_cardinal = wind_direction_to_cardinal(closest_fc["wind_deg"])
+            if use_metric:
+                wind_speed_display = closest_fc["wind_speed_ms"] * 3.6
+                wind_unit = "km/h"
+            else:
+                wind_speed_display = closest_fc["wind_speed_ms"] * 2.237
+                wind_unit = "mph"
+
+            gust_ms = closest_fc.get("wind_gust_ms") or closest_fc.get("wind_gust") or 0
+            if use_metric:
+                gust_display = f"{gust_ms * 3.6:.0f} {wind_unit}" if gust_ms else "—"
+                temp_display = f"{closest_fc['temp_c']:.0f}°C"
+            else:
+                gust_display = f"{gust_ms * 2.237:.0f} {wind_unit}" if gust_ms else "—"
+                temp_display = f"{closest_fc['temp_c'] * 9 / 5 + 32:.0f}°F"
+
+            forecast_rows.append(
+                {
+                    "Day": day_label,
+                    "Temp": temp_display,
+                    "Wind (2pm)": f"{wind_speed_display:.0f} {wind_unit} {wind_cardinal}",
+                    "Gust": gust_display,
+                    "Effect": f"💨 {tailwind_pct:.0f}% tailwind",
+                    "Est. Time": format_time(day_time),
+                    "Power (W)": f"{day_power:.0f}",
+                    "KOM Power": (f"{day_kom_power}" if day_kom_power else "—"),
+                    "Opt. Time": "—",
+                    "Even Time": "—",
+                    "Even W": "—",
+                }
+            )
+
+        # If optimizer has been run, merge in the optimized forecast data
+        _opt_forecast = st.session_state.get("_opt_forecast_data")
+        if _opt_forecast and len(_opt_forecast) == len(forecast_rows):
+            for i, opt_row in enumerate(_opt_forecast):
+                forecast_rows[i]["Opt. Time"] = opt_row.get("opt_time", "—")
+                forecast_rows[i]["Even Time"] = opt_row.get("even_time", "—")
+                forecast_rows[i]["Even W"] = opt_row.get("even_power", "—")
+
+        forecast_df = pd.DataFrame(forecast_rows)
+
+        # Hide basic model columns when optimizer data is available
+        _has_opt_data = (
+            _opt_forecast
+            and len(_opt_forecast) == len(forecast_rows)
+            and _opt_forecast[0].get("opt_time") != "—"
+        )
+        if _has_opt_data:
+            forecast_df = forecast_df.drop(
+                columns=["Est. Time", "Power (W)"], errors="ignore"
+            )
+
+        # On mobile, move Effect to the last column so the important
+        # time/power columns are visible without scrolling
+        if IS_MOBILE:
+            cols = [c for c in forecast_df.columns if c != "Effect"] + ["Effect"]
+            forecast_df = forecast_df[cols]
+
+        # Determine best day based on best available time column
+        _best_time_col = "Opt. Time" if _has_opt_data else "Est. Time"
+        if _best_time_col in forecast_df.columns:
+            best_day_label = min(forecast_rows, key=lambda r: r[_best_time_col])["Day"]
+        else:
+            best_day_label = forecast_rows[0]["Day"]
+        forecast_df["Day"] = forecast_df["Day"].apply(
+            lambda d: f"{d} (Best)" if d == best_day_label else d
+        )
+
+        def bold_best_day(row):
+            if "(Best)" in str(row["Day"]):
+                return ["font-weight: bold"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            forecast_df.style.apply(bold_best_day, axis=1),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Day": st.column_config.TextColumn(width="small"),
+            },
+        )
 
         # =============================
         # TAB 4: Segment Requests
