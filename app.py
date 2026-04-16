@@ -1152,168 +1152,176 @@ def compute_air_density_from_weather(weather_conditions, elevation_m=0):
 
 
 # =============================
-# Flagged Segments
+# Flagged Segments (Supabase)
 # =============================
 
 
-def ensure_flagged_table(db_path: str):
-    """Create the flagged_segments table if it doesn't exist."""
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS flagged_segments (
-            segment_id INTEGER PRIMARY KEY,
-            reason TEXT,
-            flagged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
+def _supabase_rest_headers():
+    """Get headers for Supabase REST API calls."""
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }, url
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_flagged_segment_ids(db_path: str) -> set:
-    """Return set of all flagged segment IDs."""
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute("SELECT segment_id FROM flagged_segments")
-    ids = {row[0] for row in cur.fetchall()}
-    conn.close()
-    return ids
+def get_flagged_segment_ids(_cache_key: str = "default") -> set:
+    """Return set of all flagged segment IDs from Supabase."""
+    import requests as _requests
 
-
-def flag_segment(db_path: str, segment_id: int, reason: str = ""):
-    """Flag a segment so it's excluded everywhere."""
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        "INSERT OR REPLACE INTO flagged_segments (segment_id, reason) VALUES (?, ?)",
-        (segment_id, reason),
-    )
-    conn.commit()
-    conn.close()
-    # Clear the cache so the change takes effect immediately
-    get_flagged_segment_ids.clear()
-
-
-def unflag_segment(db_path: str, segment_id: int):
-    """Remove a segment from the flagged list."""
-    conn = sqlite3.connect(db_path)
-    conn.execute("DELETE FROM flagged_segments WHERE segment_id = ?", (segment_id,))
-    conn.commit()
-    conn.close()
-    get_flagged_segment_ids.clear()
-
-
-def get_flagged_segments_detail(
-    db_path: str, segments_db_path: str = "segments.db"
-) -> list:
-    """Return list of (segment_id, name, reason, flagged_at) for all flagged segments."""
-    conn = sqlite3.connect(db_path)
-    conn.execute(f"ATTACH DATABASE ? AS seg_db", (segments_db_path,))
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT f.segment_id, seg_db.segments.name, f.reason, f.flagged_at
-        FROM flagged_segments f
-        LEFT JOIN seg_db.segments ON f.segment_id = seg_db.segments.id
-        ORDER BY f.flagged_at DESC
-        """
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-# =============================
-# User Feedback
-# =============================
-
-
-def ensure_feedback_table(db_path: str):
-    """Create the user_feedback table if it doesn't exist."""
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_feedback (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            feedback_type TEXT NOT NULL,
-            message TEXT NOT NULL,
-            segment_id INTEGER,
-            submitted_by TEXT,
-            submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    try:
+        headers, url = _supabase_rest_headers()
+        resp = _requests.get(
+            f"{url}/rest/v1/flagged_segments?select=segment_id",
+            headers=headers,
         )
-        """
-    )
-    conn.commit()
+        if resp.status_code == 200:
+            return {row["segment_id"] for row in resp.json()}
+    except Exception:
+        pass
+    return set()
+
+
+def flag_segment(segment_id: int, reason: str = ""):
+    """Flag a segment so it's excluded everywhere."""
+    import requests as _requests
+
+    try:
+        headers, url = _supabase_rest_headers()
+        headers["Prefer"] = "resolution=merge-duplicates"
+        _requests.post(
+            f"{url}/rest/v1/flagged_segments",
+            json={"segment_id": segment_id, "reason": reason},
+            headers=headers,
+        )
+        get_flagged_segment_ids.clear()
+    except Exception:
+        pass
+
+
+def unflag_segment(segment_id: int):
+    """Remove a segment from the flagged list."""
+    import requests as _requests
+
+    try:
+        headers, url = _supabase_rest_headers()
+        _requests.delete(
+            f"{url}/rest/v1/flagged_segments?segment_id=eq.{segment_id}",
+            headers=headers,
+        )
+        get_flagged_segment_ids.clear()
+    except Exception:
+        pass
+
+
+def get_flagged_segments_detail(segments_db_path: str = "segments.db") -> list:
+    """Return list of (segment_id, name, reason, flagged_at) for all flagged segments."""
+    import requests as _requests
+
+    try:
+        headers, url = _supabase_rest_headers()
+        resp = _requests.get(
+            f"{url}/rest/v1/flagged_segments?select=segment_id,reason,flagged_at&order=flagged_at.desc",
+            headers=headers,
+        )
+        if resp.status_code != 200:
+            return []
+        flagged = resp.json()
+    except Exception:
+        return []
+
+    if not flagged:
+        return []
+
+    # Look up segment names from the local segments DB
+    conn = sqlite3.connect(segments_db_path)
+    cur = conn.cursor()
+    results = []
+    for f in flagged:
+        cur.execute("SELECT name FROM segments WHERE id = ?", (f["segment_id"],))
+        row = cur.fetchone()
+        name = row[0] if row else "(unknown)"
+        results.append(
+            (f["segment_id"], name, f.get("reason", ""), f.get("flagged_at", ""))
+        )
     conn.close()
+    return results
+
+
+# =============================
+# User Feedback (Supabase)
+# =============================
 
 
 def submit_feedback(
-    db_path: str,
     feedback_type: str,
     message: str,
     segment_id: int = None,
     submitted_by: str = None,
+    user_id: str = None,
 ):
-    """Insert a feedback row."""
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        "INSERT INTO user_feedback (feedback_type, message, segment_id, submitted_by) "
-        "VALUES (?, ?, ?, ?)",
-        (feedback_type, message, segment_id, submitted_by),
-    )
-    conn.commit()
-    conn.close()
+    """Insert a feedback row into Supabase."""
+    import requests as _requests
 
-
-def get_recent_feedback(db_path: str, limit: int = 50) -> list:
-    """Return recent feedback rows."""
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, feedback_type, message, segment_id, submitted_by, submitted_at
-        FROM user_feedback
-        ORDER BY submitted_at DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-# =============================
-# Location Geocoding & Requests
-# =============================
-
-
-def ensure_location_requests_table(db_path: str):
-    """Create the location_requests table if it doesn't exist."""
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS location_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            location_input TEXT NOT NULL,
-            resolved_name TEXT,
-            lat REAL,
-            lon REAL,
-            nearest_region TEXT,
-            distance_miles REAL,
-            user_id TEXT,
-            requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    try:
+        headers, url = _supabase_rest_headers()
+        row = {
+            "feedback_type": feedback_type,
+            "message": message,
+        }
+        if segment_id:
+            row["segment_id"] = segment_id
+        if submitted_by:
+            row["submitted_by"] = submitted_by
+        if user_id:
+            row["user_id"] = user_id
+        headers["Prefer"] = "return=minimal"
+        _requests.post(
+            f"{url}/rest/v1/user_feedback",
+            json=row,
+            headers=headers,
         )
-        """
-    )
-    conn.commit()
-    conn.close()
+    except Exception:
+        pass
+
+
+def get_recent_feedback(limit: int = 50) -> list:
+    """Return recent feedback rows from Supabase."""
+    import requests as _requests
+
+    try:
+        headers, url = _supabase_rest_headers()
+        resp = _requests.get(
+            f"{url}/rest/v1/user_feedback?select=id,feedback_type,message,segment_id,submitted_by,submitted_at&order=submitted_at.desc&limit={limit}",
+            headers=headers,
+        )
+        if resp.status_code == 200:
+            rows = resp.json()
+            return [
+                (
+                    r["id"],
+                    r["feedback_type"],
+                    r["message"],
+                    r.get("segment_id"),
+                    r.get("submitted_by"),
+                    r.get("submitted_at"),
+                )
+                for r in rows
+            ]
+    except Exception:
+        pass
+    return []
+
+
+# =============================
+# Location Geocoding & Requests (Supabase)
+# =============================
 
 
 def log_location_request(
-    db_path: str,
     location_input: str,
     resolved_name: str,
     lat: float,
@@ -1322,33 +1330,114 @@ def log_location_request(
     distance_miles: float,
     user_id: str = None,
 ):
-    """Log an unsupported location request."""
-    conn = sqlite3.connect(db_path)
-    # Don't log duplicates within the same day
-    conn.execute(
-        """
-        INSERT INTO location_requests
-            (location_input, resolved_name, lat, lon, nearest_region, distance_miles, user_id)
-        SELECT ?, ?, ?, ?, ?, ?, ?
-        WHERE NOT EXISTS (
-            SELECT 1 FROM location_requests
-            WHERE resolved_name = ?
-            AND DATE(requested_at) = DATE('now')
+    """Log an unsupported location request to Supabase."""
+    import requests as _requests
+
+    try:
+        headers, url = _supabase_rest_headers()
+        headers["Prefer"] = "return=minimal"
+        _requests.post(
+            f"{url}/rest/v1/location_requests",
+            json={
+                "location_input": location_input,
+                "resolved_name": resolved_name,
+                "lat": lat,
+                "lon": lon,
+                "nearest_region": nearest_region,
+                "distance_miles": distance_miles,
+                "user_id": user_id,
+            },
+            headers=headers,
         )
-        """,
-        (
-            location_input,
-            resolved_name,
-            lat,
-            lon,
-            nearest_region,
-            distance_miles,
-            user_id,
-            resolved_name,
-        ),
-    )
-    conn.commit()
-    conn.close()
+    except Exception:
+        pass
+
+
+# =============================
+# Segment Requests (Supabase)
+# =============================
+
+
+def submit_segment_request(
+    segment_id: int,
+    requested_by: str = None,
+    user_id: str = None,
+    user_email: str = None,
+    notes: str = None,
+):
+    """Submit a segment request to Supabase."""
+    import requests as _requests
+
+    try:
+        headers, url = _supabase_rest_headers()
+        headers["Prefer"] = "return=minimal"
+        row = {"segment_id": segment_id}
+        if requested_by:
+            row["requested_by"] = requested_by
+        if user_id:
+            row["user_id"] = user_id
+        if user_email:
+            row["user_email"] = user_email
+        if notes:
+            row["notes"] = notes
+        _requests.post(
+            f"{url}/rest/v1/segment_requests",
+            json=row,
+            headers=headers,
+        )
+    except Exception:
+        pass
+
+
+def get_pending_requests() -> list:
+    """Get pending segment requests from Supabase."""
+    import requests as _requests
+
+    try:
+        headers, url = _supabase_rest_headers()
+        resp = _requests.get(
+            f"{url}/rest/v1/segment_requests?status=eq.pending&select=segment_id,requested_by,notes,requested_at&order=requested_at.desc",
+            headers=headers,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return []
+
+
+def get_pending_segment_ids() -> set:
+    """Get set of segment IDs that are already pending."""
+    import requests as _requests
+
+    try:
+        headers, url = _supabase_rest_headers()
+        resp = _requests.get(
+            f"{url}/rest/v1/segment_requests?status=eq.pending&select=segment_id",
+            headers=headers,
+        )
+        if resp.status_code == 200:
+            return {r["segment_id"] for r in resp.json()}
+    except Exception:
+        pass
+    return set()
+
+
+def get_processed_requests(limit: int = 20) -> list:
+    """Get recently processed segment requests from Supabase."""
+    import requests as _requests
+
+    try:
+        headers, url = _supabase_rest_headers()
+        resp = _requests.get(
+            f"{url}/rest/v1/segment_requests?status=neq.pending&select=segment_id,requested_by,status,requested_at,processed_at&order=processed_at.desc&limit={limit}",
+            headers=headers,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return []
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1411,12 +1500,7 @@ def main():
 
     # Constants
     DB_PATH = "segments.db"
-    REQUESTS_DB_PATH = "requests.db"
-
-    # Ensure tables exist
-    ensure_flagged_table(REQUESTS_DB_PATH)
-    ensure_feedback_table(REQUESTS_DB_PATH)
-    ensure_location_requests_table(REQUESTS_DB_PATH)
+    # Tables for requests/feedback/flags are in Supabase (no local DB needed)
 
     # =============================
     # Location selector (drives everything else)
@@ -1557,7 +1641,6 @@ def main():
                 else:
                     user_id = str(user.id) if user else None
                     log_location_request(
-                        REQUESTS_DB_PATH,
                         location_input.strip(),
                         resolved_name,
                         geo["lat"],
@@ -1867,7 +1950,7 @@ def main():
         tab_favs = None
 
     # Load flagged segment IDs once (used by all tabs)
-    flagged_ids = get_flagged_segment_ids(REQUESTS_DB_PATH)
+    flagged_ids = get_flagged_segment_ids()
 
     def _render_segment_cards(top_segments, use_metric):
         """Render the top segment cards for a day column in Tab 1."""
@@ -4040,25 +4123,6 @@ def main():
             "Requests are queued and processed periodically by the admin."
         )
 
-        # Ensure request table exists
-        conn_req = sqlite3.connect(REQUESTS_DB_PATH)
-        conn_req.execute(
-            """
-            CREATE TABLE IF NOT EXISTS segment_requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                segment_id INTEGER NOT NULL,
-                requested_by TEXT,
-                user_id TEXT,
-                user_email TEXT,
-                notes TEXT,
-                status TEXT DEFAULT 'pending',
-                requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                processed_at TIMESTAMP
-            )
-        """
-        )
-        conn_req.commit()
-
         # --- Submit form ---
         st.subheader("Submit a Request")
         st.caption(
@@ -4111,7 +4175,6 @@ def main():
                 token = token.strip()
                 if not token:
                     continue
-                # Handle full URLs: extract number from end
                 if "/" in token:
                     token = token.rstrip("/").split("/")[-1]
                 try:
@@ -4123,7 +4186,6 @@ def main():
                 st.warning(f"Could not parse: {', '.join(bad_ids)}")
 
             if parsed_ids:
-                # Check which are already in segments table
                 # Check which are already in segments database
                 conn_seg_check = sqlite3.connect(DB_PATH)
                 cur_seg_check = conn_seg_check.cursor()
@@ -4135,13 +4197,8 @@ def main():
                 already_in_db = set(r[0] for r in cur_seg_check.fetchall())
                 conn_seg_check.close()
 
-                # Check which are already requested (pending) in requests db
-                cur_req = conn_req.cursor()
-                cur_req.execute(
-                    f"SELECT segment_id FROM segment_requests WHERE segment_id IN ({placeholders}) AND status = 'pending'",
-                    parsed_ids,
-                )
-                already_requested = set(r[0] for r in cur_req.fetchall())
+                # Check which are already pending in Supabase
+                already_requested = get_pending_segment_ids()
 
                 submitted = []
                 skipped_db = []
@@ -4155,19 +4212,14 @@ def main():
                     else:
                         _req_user_id = str(user.id) if user else None
                         _req_user_email = user.email if user else None
-                        cur_req.execute(
-                            "INSERT INTO segment_requests (segment_id, requested_by, user_id, user_email, notes) VALUES (?, ?, ?, ?, ?)",
-                            (
-                                sid,
-                                requested_by.strip() or None,
-                                _req_user_id,
-                                _req_user_email,
-                                notes.strip() or None,
-                            ),
+                        submit_segment_request(
+                            sid,
+                            requested_by=requested_by.strip() or None,
+                            user_id=_req_user_id,
+                            user_email=_req_user_email,
+                            notes=notes.strip() or None,
                         )
                         submitted.append(sid)
-
-                conn_req.commit()
 
                 if submitted:
                     st.success(
@@ -4189,24 +4241,12 @@ def main():
         st.markdown("---")
         st.subheader("Request Queue")
 
-        cur_req = conn_req.cursor()
-
-        # Pending requests
-        cur_req.execute(
-            """
-            SELECT segment_id, requested_by, notes, requested_at
-            FROM segment_requests
-            WHERE status = 'pending'
-            ORDER BY requested_at DESC
-        """
-        )
-        pending = cur_req.fetchall()
+        pending = get_pending_requests()
 
         if pending:
             st.caption(f"**{len(pending)} pending request(s)** — awaiting processing")
-            pending_df = pd.DataFrame(
-                pending, columns=["Segment ID", "Requested By", "Notes", "Requested At"]
-            )
+            pending_df = pd.DataFrame(pending)
+            pending_df.columns = ["Segment ID", "Requested By", "Notes", "Requested At"]
             pending_df["Requested By"] = pending_df["Requested By"].fillna("—")
             pending_df["Notes"] = pending_df["Notes"].fillna("—")
             pending_df["Strava Link"] = pending_df["Segment ID"].apply(
@@ -4226,33 +4266,20 @@ def main():
             st.caption("No pending requests")
 
         # Recently processed
-        cur_req.execute(
-            """
-            SELECT segment_id, requested_by, status, requested_at, processed_at
-            FROM segment_requests
-            WHERE status != 'pending'
-            ORDER BY processed_at DESC
-            LIMIT 20
-        """
-        )
-        processed = cur_req.fetchall()
+        processed = get_processed_requests()
 
         if processed:
             with st.expander(f"Recently processed ({len(processed)})", expanded=False):
-                proc_df = pd.DataFrame(
-                    processed,
-                    columns=[
-                        "Segment ID",
-                        "Requested By",
-                        "Status",
-                        "Requested",
-                        "Processed",
-                    ],
-                )
+                proc_df = pd.DataFrame(processed)
+                proc_df.columns = [
+                    "Segment ID",
+                    "Requested By",
+                    "Status",
+                    "Requested",
+                    "Processed",
+                ]
                 proc_df["Requested By"] = proc_df["Requested By"].fillna("—")
                 st.dataframe(proc_df, use_container_width=True, hide_index=True)
-
-        conn_req.close()
 
         # --- Admin instructions ---
         with st.expander("🔧 Admin: How to process requests"):
@@ -4319,7 +4346,7 @@ def main():
                     conn_check.close()
 
                     if seg_row:
-                        flag_segment(REQUESTS_DB_PATH, seg_id, flag_reason.strip())
+                        flag_segment(seg_id, flag_reason.strip())
                         st.success(
                             f"Excluded segment {seg_id} ({seg_row[0]}). "
                             "It will be hidden from all tabs."
@@ -4334,7 +4361,7 @@ def main():
 
         # --- Currently flagged ---
         st.subheader("Currently Excluded")
-        flagged_details = get_flagged_segments_detail(REQUESTS_DB_PATH, DB_PATH)
+        flagged_details = get_flagged_segments_detail(DB_PATH)
 
         if flagged_details:
             flagged_df = pd.DataFrame(
@@ -4371,7 +4398,7 @@ def main():
 
             if unflag_clicked:
                 unflag_id = int(selected_unflag.split(" — ")[0])
-                unflag_segment(REQUESTS_DB_PATH, unflag_id)
+                unflag_segment(unflag_id)
                 st.success(f"Restored segment {unflag_id}.")
                 st.rerun()
         else:
@@ -4425,12 +4452,13 @@ def main():
                 except ValueError:
                     pass
 
+            _fb_user_id = str(user.id) if user else None
             submit_feedback(
-                REQUESTS_DB_PATH,
                 feedback_type,
                 message.strip(),
                 segment_id=seg_id_val,
                 submitted_by=submitted_by.strip() or None,
+                user_id=_fb_user_id,
             )
             st.success("Thanks! Your feedback has been submitted.")
         elif submit_fb:
@@ -4440,7 +4468,7 @@ def main():
         st.markdown("---")
         st.subheader("Recent Feedback")
 
-        recent = get_recent_feedback(REQUESTS_DB_PATH, limit=20)
+        recent = get_recent_feedback(limit=20)
         if recent:
             for fb_id, fb_type, fb_msg, fb_seg, fb_by, fb_at in recent:
                 by_str = f" — {fb_by}" if fb_by else ""
