@@ -2671,24 +2671,48 @@ def main():
             if not fav_ids:
                 st.info(
                     "You haven't favorited any segments yet. "
-                    "Use the ⭐ checkbox on segment cards in the Daily Planner tab to add favorites."
+                    "Use the ⭐ checkbox on segment cards in the Daily Planner or Segment Simulator tabs."
                 )
             else:
-                # Load segment data for favorites
+                # Load ALL segments (not filtered by region) so favorites from any region show
                 try:
-                    all_segments = get_segments_for_region(
-                        DB_PATH, selected_region, max_distance
+                    conn_fav = sqlite3.connect(DB_PATH)
+                    all_fav_segments = pd.read_sql(
+                        """
+                        SELECT id, name, distance_m, elevation_gain_m, avg_grade,
+                               start_lat, start_lng, end_lat, end_lng, city, state
+                        FROM segments
+                        WHERE start_lat IS NOT NULL AND end_lat IS NOT NULL
+                        """,
+                        conn_fav,
                     )
-                    fav_df = all_segments[all_segments["id"].isin(fav_ids)].copy()
+                    conn_fav.close()
+                    fav_df = all_fav_segments[
+                        all_fav_segments["id"].isin(fav_ids)
+                    ].copy()
                 except Exception:
                     fav_df = pd.DataFrame()
 
                 if len(fav_df) == 0:
                     st.warning(
-                        "Your favorited segments aren't in the current region/distance. "
-                        "Try selecting 'All Locations' or increasing the distance filter."
+                        "Could not load your favorited segments from the database."
                     )
                 else:
+                    # Assign region to each segment
+                    def _assign_region(row):
+                        closest = min(
+                            REGIONS.items(),
+                            key=lambda r: _haversine(
+                                row["start_lat"],
+                                row["start_lng"],
+                                r[1]["lat"],
+                                r[1]["lon"],
+                            ),
+                        )
+                        return closest[0]
+
+                    fav_df["_region"] = fav_df.apply(_assign_region, axis=1)
+
                     # Get today's weather for wind calculations
                     _today_key_fav = datetime.now().strftime("%Y-%m-%d")
                     forecasts_fav = _fetch_forecast_cached(
@@ -2730,7 +2754,6 @@ def main():
                         seg_weather = weather_fav.copy()
                         seg_weather["wind_angle"] = wind_angle
 
-                        # Simulate with wind
                         try:
                             result = estimate_time_with_entrance_speed(
                                 segment_dict,
@@ -2744,7 +2767,6 @@ def main():
                             your_time = 9999
                             power_w = 0
 
-                        # Simulate without wind
                         try:
                             neutral_weather = seg_weather.copy()
                             neutral_weather["wind_speed_ms"] = 0
@@ -2755,75 +2777,106 @@ def main():
                                 entrance_speed,
                                 neutral_weather,
                             )
-                            neutral_time = neutral_result["total_time"]
-                            wind_impact = neutral_time - your_time
+                            wind_impact = neutral_result["total_time"] - your_time
                         except Exception:
                             wind_impact = 0
 
-                        # Get KOM
                         kom_time = _get_kom_time(DB_PATH, int(seg["id"]))
 
                         if use_metric:
-                            dist_str = f"{seg['distance_m'] / 1000:.2f} km"
-                            elev_str = f"{seg.get('elevation_gain_m', 0):.0f} m"
+                            dist_val = seg["distance_m"] / 1000
+                            elev_val = seg.get("elevation_gain_m", 0)
                         else:
-                            dist_str = f"{seg['distance_m'] / 1000 * 0.621371:.2f} mi"
-                            elev_str = (
-                                f"{seg.get('elevation_gain_m', 0) * 3.28084:.0f} ft"
-                            )
+                            dist_val = seg["distance_m"] / 1000 * 0.621371
+                            elev_val = seg.get("elevation_gain_m", 0) * 3.28084
 
                         fav_rows.append(
                             {
                                 "Segment": seg["name"],
-                                "Distance": dist_str,
-                                "Elevation": elev_str,
-                                "Grade": f"{seg['avg_grade']:.1f}%",
+                                "Region": seg["_region"].split(",")[0],
+                                "Dist": round(dist_val, 2),
+                                "Elev": round(elev_val, 0),
+                                "Grade %": round(seg["avg_grade"], 1),
                                 "Est. Time": (
                                     format_time(your_time) if your_time < 9999 else "—"
                                 ),
-                                "Power (W)": f"{power_w:.0f}" if power_w > 0 else "—",
+                                "Power": int(power_w) if power_w > 0 else None,
                                 "KOM": format_time(kom_time) if kom_time else "—",
-                                "Tailwind": f"{tailwind_pct:.0f}%",
-                                "Wind Impact": (
-                                    f"{wind_impact:+.0f}s" if wind_impact != 0 else "0s"
+                                "Wind": f"{tailwind_pct:.0f}%",
+                                "Impact": (
+                                    f"{wind_impact:+.1f}s"
+                                    if abs(wind_impact) >= 0.5
+                                    else "—"
                                 ),
-                                "Strava": f"https://www.strava.com/segments/{seg['id']}",
+                                "Link": f"https://www.strava.com/segments/{seg['id']}",
                                 "_segment_id": int(seg["id"]),
-                                "_wind_impact": wind_impact,
+                                "_wind_impact_sort": wind_impact,
+                                "_time_sort": your_time,
                             }
                         )
 
                     # Sort alphabetically by segment name
                     fav_rows = sorted(fav_rows, key=lambda x: x["Segment"].lower())
 
+                    # Summary caption
+                    regions_represented = sorted(set(r["Region"] for r in fav_rows))
+                    if use_metric:
+                        wind_str = f"{today_fc['wind_speed_ms'] * 3.6:.0f} km/h"
+                    else:
+                        wind_str = f"{today_fc['wind_speed_ms'] * 2.237:.0f} mph"
+                    st.caption(
+                        f"**{len(fav_rows)} favorite(s)** across {len(regions_represented)} region(s) · "
+                        f"Wind today: {wind_str} {wind_direction_to_cardinal(today_fc['wind_deg'])}"
+                    )
+
                     # Build display dataframe
                     display_cols = [
                         "Segment",
-                        "Distance",
-                        "Elevation",
-                        "Grade",
+                        "Region",
+                        "Dist",
+                        "Elev",
+                        "Grade %",
                         "Est. Time",
-                        "Power (W)",
+                        "Power",
                         "KOM",
-                        "Tailwind",
-                        "Wind Impact",
-                        "Strava",
+                        "Wind",
+                        "Impact",
+                        "Link",
                     ]
                     fav_display_df = pd.DataFrame(fav_rows)[display_cols]
 
-                    st.caption(
-                        f"**{len(fav_rows)} favorite segment(s)** — "
-                        f"wind impact based on today's forecast "
-                        f"({today_fc['wind_speed_ms'] * 2.237:.0f} mph "
-                        f"{wind_direction_to_cardinal(today_fc['wind_deg'])})"
-                    )
+                    # Column config for nicer display
+                    dist_label = "Dist (km)" if use_metric else "Dist (mi)"
+                    elev_label = "Elev (m)" if use_metric else "Elev (ft)"
 
                     st.dataframe(
                         fav_display_df,
                         use_container_width=True,
                         hide_index=True,
                         column_config={
-                            "Strava": st.column_config.LinkColumn(
+                            "Segment": st.column_config.TextColumn(
+                                "Segment", width="medium"
+                            ),
+                            "Region": st.column_config.TextColumn(
+                                "Region", width="small"
+                            ),
+                            "Dist": st.column_config.NumberColumn(
+                                dist_label, format="%.2f"
+                            ),
+                            "Elev": st.column_config.NumberColumn(
+                                elev_label, format="%.0f"
+                            ),
+                            "Grade %": st.column_config.NumberColumn(
+                                "Grade %", format="%.1f"
+                            ),
+                            "Est. Time": st.column_config.TextColumn("Est. Time"),
+                            "Power": st.column_config.NumberColumn(
+                                "Power (W)", format="%d"
+                            ),
+                            "KOM": st.column_config.TextColumn("KOM"),
+                            "Wind": st.column_config.TextColumn("Tailwind"),
+                            "Impact": st.column_config.TextColumn("Wind Δ"),
+                            "Link": st.column_config.LinkColumn(
                                 "Strava", display_text="Open"
                             ),
                         },
@@ -2834,7 +2887,7 @@ def main():
                         for row in fav_rows:
                             seg_id = row["_segment_id"]
                             if st.checkbox(
-                                f"Remove: {row['Segment']}",
+                                f"Remove: {row['Segment']} ({row['Region']})",
                                 key=f"unfav_{seg_id}",
                             ):
                                 toggle_favorite(sb, str(user.id), seg_id)
