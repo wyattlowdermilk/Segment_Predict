@@ -48,16 +48,16 @@ st.markdown(
     .stExpander summary span { font-size: 0.82rem !important; }
     .stButton > button { width: 100% !important; }
     .stCaption, .stMarkdown, label { font-size: 0.78rem !important; }
-    /* Shrink st.metric text on narrow screens (mobile). Targets Streamlit's
-       metric value (big number) and label (small caption) globally via class
-       names rather than data-testids — safer across Streamlit versions. */
+    /* Shrink st.metric text on narrow screens (mobile). Midpoint between
+       Streamlit default (1.75rem / 0.875rem) and our first shrink pass,
+       since full shrink felt too small on phone. */
     .stMetric [class*="MetricValue"],
     .stMetric div[data-testid="stMetricValue"] {
-        font-size: 1.1rem !important;
+        font-size: 1.4rem !important;
     }
     .stMetric [class*="MetricLabel"],
     .stMetric div[data-testid="stMetricLabel"] {
-        font-size: 0.72rem !important;
+        font-size: 0.8rem !important;
     }
 }
 @media only screen and (max-width: 380px) {
@@ -3124,75 +3124,13 @@ def main():
         # Get KOM/QOM time for this segment (based on Show QOM toggle)
         kom_time = _get_kom_time(DB_PATH, int(segment_id), use_qom=show_qom)
 
-        # ── Top metrics layout ──
-        # Desktop: one 4-column row (Distance / Elev / Grade / KOM).
-        # Mobile: two columns side-by-side — static segment metrics on the
-        # left, placeholders for the simulated results (Est Time / Avg Speed
-        # / Power) on the right. The placeholders are filled in later, once
-        # the physics simulation has run with the user's selected parameters.
-        _mobile_est_time_slot = None
-        _mobile_speed_slot = None
-        _mobile_power_slot = None
-        if IS_MOBILE:
-            _left_col, _right_col = st.columns(2)
-            with _left_col:
-                if use_metric:
-                    st.metric("Distance", f"{segment_data['distance_m']/1000:.2f} km")
-                else:
-                    st.metric(
-                        "Distance",
-                        f"{segment_data['distance_m']/1000 * 0.621371:.2f} mi",
-                    )
-                if use_metric:
-                    st.metric(
-                        "Elevation Gain", f"{segment_data['elevation_gain_m']:.0f} m"
-                    )
-                else:
-                    st.metric(
-                        "Elevation Gain",
-                        f"{segment_data['elevation_gain_m'] * 3.28084:.0f} ft",
-                    )
-                st.metric("Average Grade", f"{segment_data['avg_grade']:.1f}%")
-                st.metric(
-                    f"🏆 {_bench_label}",
-                    format_time(kom_time) if kom_time else "—",
-                )
-            with _right_col:
-                # Reserve slots for simulated results — filled in after the
-                # physics simulation completes further down.
-                _mobile_est_time_slot = st.empty()
-                _mobile_speed_slot = st.empty()
-                _mobile_power_slot = st.empty()
-        else:
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                if use_metric:
-                    st.metric("Distance", f"{segment_data['distance_m']/1000:.2f} km")
-                else:
-                    st.metric(
-                        "Distance",
-                        f"{segment_data['distance_m']/1000 * 0.621371:.2f} mi",
-                    )
-            with col2:
-                if use_metric:
-                    st.metric(
-                        "Elevation Gain", f"{segment_data['elevation_gain_m']:.0f} m"
-                    )
-                else:
-                    st.metric(
-                        "Elevation Gain",
-                        f"{segment_data['elevation_gain_m'] * 3.28084:.0f} ft",
-                    )
-            with col3:
-                st.metric("Average Grade", f"{segment_data['avg_grade']:.1f}%")
-            with col4:
-                st.metric(
-                    f"🏆 {_bench_label}",
-                    format_time(kom_time) if kom_time else "—",
-                )
+        # ── Pre-compute everything needed for the metrics display ──
+        # This block was previously interleaved between the top metrics
+        # row and the parameter sliders. It now runs first so that on
+        # mobile we can render all 7 metrics (static + simulated) in a
+        # single 2-column HTML grid at the top of the page.
 
-        # Compute sustainable power for this segment duration
-        # First pass: estimate duration using a rough power guess, then refine
+        # Segment dict used for several estimates below
         segment_dict_est = {
             "distance_m": segment_data["distance_m"],
             "avg_grade": segment_data["avg_grade"],
@@ -3202,7 +3140,7 @@ def main():
 
         # Read Tab 2's own entrance speed AND wind condition from session_state.
         # The widgets render further down but we need their values here so the
-        # Best Effort / KOM-match calcs reflect current wind and entrance speed.
+        # Best Effort / KOM-match / Results calcs reflect current selections.
         # Falls back to slider defaults on first render.
         if use_metric:
             _t2_es_default_kmh = 32
@@ -3249,11 +3187,10 @@ def main():
             "wind_speed_ms": _t2_wind_ms_early,
             "wind_angle": _t2_wind_angle_early,
         }
-        # Initial guess: use mid-range power to get a time estimate
-        initial_guess_power = athlete.sustainable_power(
-            3.0
-        )  # 3-min power as starting point
 
+        # Estimate duration with a 3-min-power guess, then look up the correct
+        # sustainable power for that actual duration.
+        initial_guess_power = athlete.sustainable_power(3.0)
         est_result = estimate_time_with_entrance_speed(
             segment_dict_est,
             athlete,
@@ -3262,7 +3199,6 @@ def main():
             target_power=initial_guess_power,
         )
         est_duration_minutes = est_result["total_time"] / 60
-        # Now look up the correct power for that actual estimated duration
         natural_power = athlete.sustainable_power(est_duration_minutes)
 
         # Compute KOM-matching power if KOM exists
@@ -3274,7 +3210,6 @@ def main():
                 "elevation_high_m": segment_data["elevation_gain_m"],
                 "elevation_low_m": 0,
             }
-            # KOM-match also reflects current wind + entrance speed
             weather_kom = {
                 "temp_c": 15,
                 "pressure_hpa": 1013,
@@ -3299,7 +3234,6 @@ def main():
                 else:
                     hi_p = mid_p
 
-        # Power note
         power_note = f"Best effort for these conditions: **{natural_power:.0f} W**"
         if optimized_power and kom_time:
             power_note += f" · To match {_bench_label} ({format_time(kom_time)}): **{optimized_power} W**"
@@ -3308,6 +3242,134 @@ def main():
         if st.session_state.get("_tab2_segment_id") != segment_id:
             st.session_state["_tab2_segment_id"] = segment_id
             st.session_state["tab2_power"] = int(natural_power)
+
+        # Read the target power from session_state (set by the slider on a
+        # prior render, or by the segment-change reset above on first render).
+        _t2_target_power_early = st.session_state.get("tab2_power", int(natural_power))
+
+        # Run the simulation with all current values (used by mobile top-grid
+        # and by desktop col_results further down — avoids running twice).
+        segment_dict = {
+            "distance_m": segment_data["distance_m"],
+            "avg_grade": segment_data["avg_grade"],
+            "elevation_high_m": segment_data["elevation_gain_m"],
+            "elevation_low_m": 0,
+        }
+        weather_conditions_early = {
+            "temp_c": 15,
+            "pressure_hpa": 1013,
+            "wind_speed_ms": _t2_wind_ms_early,
+            "wind_angle": _t2_wind_angle_early,
+        }
+        result = estimate_time_with_entrance_speed(
+            segment_dict,
+            athlete,
+            entrance_speed_t2_early,
+            weather_conditions_early,
+            target_power=_t2_target_power_early,
+        )
+
+        # Build display strings for the simulated metrics
+        your_time = result["total_time"]
+        leaderboard_data = _get_leaderboard(
+            DB_PATH, int(segment_id), 20, use_qom=show_qom
+        )
+        if leaderboard_data and kom_time:
+            time_behind_kom = your_time - kom_time
+            _time_display = f"{format_time(your_time)} ({time_behind_kom:+.0f}s)"
+        else:
+            _time_display = format_time(your_time)
+
+        avg_speed_mph = result["cruise_speed_mph"]
+        if use_metric:
+            _speed_display = f"{avg_speed_mph * 1.60934:.1f} km/h"
+        else:
+            _speed_display = f"{avg_speed_mph:.1f} mph"
+        _power_display = f"{_t2_target_power_early:.0f} W"
+
+        # Pre-compute the static metric strings used in both layouts.
+        if use_metric:
+            _dist_display = f"{segment_data['distance_m']/1000:.2f} km"
+            _elev_display = f"{segment_data['elevation_gain_m']:.0f} m"
+        else:
+            _dist_display = f"{segment_data['distance_m']/1000 * 0.621371:.2f} mi"
+            _elev_display = f"{segment_data['elevation_gain_m'] * 3.28084:.0f} ft"
+        _grade_display = f"{segment_data['avg_grade']:.1f}%"
+        _kom_display = format_time(kom_time) if kom_time else "—"
+
+        # ── Top metrics layout ──
+        # Mobile: single HTML grid, 2 columns × 4 rows, guaranteed side-by-side
+        # at any viewport width (no dependence on Streamlit's column behavior).
+        # Desktop: 4-column row of st.metric widgets.
+        if IS_MOBILE:
+            _metric_html = f"""
+            <style>
+              .t2-metric-grid {{
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px 12px;
+                margin: 4px 0 12px 0;
+              }}
+              .t2-metric-cell {{
+                padding: 4px 0;
+              }}
+              .t2-metric-label {{
+                font-size: 0.72rem;
+                color: rgba(250, 250, 250, 0.6);
+                line-height: 1.2;
+                margin-bottom: 2px;
+                text-transform: none;
+              }}
+              .t2-metric-value {{
+                font-size: 1.25rem;
+                font-weight: 600;
+                color: inherit;
+                line-height: 1.2;
+              }}
+            </style>
+            <div class="t2-metric-grid">
+              <div class="t2-metric-cell">
+                <div class="t2-metric-label">Distance</div>
+                <div class="t2-metric-value">{_dist_display}</div>
+              </div>
+              <div class="t2-metric-cell">
+                <div class="t2-metric-label">⏱️ Estimated Time</div>
+                <div class="t2-metric-value">{_time_display}</div>
+              </div>
+              <div class="t2-metric-cell">
+                <div class="t2-metric-label">Elevation Gain</div>
+                <div class="t2-metric-value">{_elev_display}</div>
+              </div>
+              <div class="t2-metric-cell">
+                <div class="t2-metric-label">🏁 Average Speed</div>
+                <div class="t2-metric-value">{_speed_display}</div>
+              </div>
+              <div class="t2-metric-cell">
+                <div class="t2-metric-label">Average Grade</div>
+                <div class="t2-metric-value">{_grade_display}</div>
+              </div>
+              <div class="t2-metric-cell">
+                <div class="t2-metric-label">⚡ Power</div>
+                <div class="t2-metric-value">{_power_display}</div>
+              </div>
+              <div class="t2-metric-cell">
+                <div class="t2-metric-label">🏆 {_bench_label}</div>
+                <div class="t2-metric-value">{_kom_display}</div>
+              </div>
+              <div class="t2-metric-cell"></div>
+            </div>
+            """
+            st.markdown(_metric_html, unsafe_allow_html=True)
+        else:
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Distance", _dist_display)
+            with col2:
+                st.metric("Elevation Gain", _elev_display)
+            with col3:
+                st.metric("Average Grade", _grade_display)
+            with col4:
+                st.metric(f"🏆 {_bench_label}", _kom_display)
 
         # === Three-column layout: Parameters | Results | Elevation Profile ===
         # Load elevation data early so we can show it in the right column
@@ -3411,39 +3473,14 @@ def main():
 
         with col_results:
             # Results caption only makes sense on desktop — on mobile, the
-            # Est Time / Avg Speed / Power metrics render in the top-right
-            # column instead of here.
+            # Est Time / Avg Speed / Power metrics render in the top HTML grid
+            # instead of here (nothing to show in this column).
             if not IS_MOBILE:
                 st.caption("**Results**")
-
-            # Estimated time with KOM/QOM delta
-            your_time = result["total_time"]
-            leaderboard_data = _get_leaderboard(
-                DB_PATH, int(segment_id), 20, use_qom=show_qom
-            )
-            if leaderboard_data and kom_time:
-                time_behind_kom = your_time - kom_time
-                time_display = f"{format_time(your_time)}  ({time_behind_kom:+.0f}s)"
-            else:
-                time_display = format_time(your_time)
-
-            avg_speed_mph = result["cruise_speed_mph"]
-            if use_metric:
-                _speed_display = f"{avg_speed_mph * 1.60934:.1f} km/h"
-            else:
-                _speed_display = f"{avg_speed_mph:.1f} mph"
-            _power_display = f"{target_power:.0f} W"
-
-            # On mobile, fill the placeholders that were reserved at the top
-            # of the page so Est Time / Avg Speed / Power appear in the right
-            # column next to Distance / Elev / Grade / KOM, per mobile layout.
-            if IS_MOBILE and _mobile_est_time_slot is not None:
-                _mobile_est_time_slot.metric("⏱️ Estimated Time", time_display)
-                _mobile_speed_slot.metric("🏁 Average Speed", _speed_display)
-                _mobile_power_slot.metric("⚡ Power", _power_display)
-            else:
-                # Desktop: render in the results column as before.
-                st.metric("⏱️ Estimated Time", time_display)
+                # Desktop: render the three results metrics. The display
+                # strings (_time_display, _speed_display, _power_display)
+                # were pre-computed at the top of this page.
+                st.metric("⏱️ Estimated Time", _time_display)
                 st.metric("🏁 Average Speed", _speed_display)
                 st.metric("⚡ Power", _power_display)
 
