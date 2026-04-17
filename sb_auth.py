@@ -192,8 +192,40 @@ def login_ui(sb: Client):
     # cancelled or failed sign-in.
     auth_url = _build_google_auth_url()
 
+    # ── TEMPORARY DEBUG: remove this block once sign-in works ──
+    with st.expander("🔧 Debug: OAuth diagnostics", expanded=False):
+        try:
+            from streamlit import context as _dbg_ctx
+
+            _dbg_headers = (
+                dict(_dbg_ctx.headers) if hasattr(_dbg_ctx, "headers") else {}
+            )
+        except Exception as _dbg_e:
+            _dbg_headers = {"_error": str(_dbg_e)}
+        st.write("**Redirect URL being sent to Supabase:**")
+        st.code(_get_redirect_url())
+        st.write("**Full Supabase authorize URL:**")
+        st.code(auth_url)
+        st.write("**Headers seen by the app:**")
+        st.json(
+            {
+                k: v
+                for k, v in _dbg_headers.items()
+                if k.lower()
+                in (
+                    "host",
+                    "x-forwarded-proto",
+                    "x-forwarded-host",
+                    "x-forwarded-for",
+                    "referer",
+                    "origin",
+                    "user-agent",
+                )
+            }
+        )
+
     st.markdown(
-        f'<a href="{auth_url}" target="_top" referrerpolicy="no-referrer" style="'
+        f'<a href="{auth_url}" target="_self" style="'
         f"display:flex; align-items:center; justify-content:center; gap:8px; "
         f"padding:10px 16px; border-radius:8px; "
         f"background:#2d333b; border:1px solid #444c56; "
