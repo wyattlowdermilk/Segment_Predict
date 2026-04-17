@@ -229,26 +229,15 @@ def login_ui(sb: Client):
             }
         )
 
-    # Use a button with JS navigation instead of an <a> tag.
-    # Streamlit renders user HTML inside a sandboxed iframe; clicking an
-    # <a href="..."> link inside the iframe causes an iframe-originated
-    # cross-site navigation, which Google's OAuth servers sometimes reject
-    # as potential clickjacking (403 at accountchooser).
-    # window.top.location.href navigates the browser's top-level window,
-    # indistinguishable from the user pasting the URL into the address bar.
-    # We escape quotes in auth_url (it's URL-encoded already, so just in case).
-    _js_safe_url = auth_url.replace("'", "\\'")
-    st.markdown(
-        f'<button onclick="window.top.location.href=\'{_js_safe_url}\'" style="'
-        f"display:flex; align-items:center; justify-content:center; gap:8px; "
-        f"padding:10px 16px; border-radius:8px; "
-        f"background:#2d333b; border:1px solid #444c56; "
-        f"color:#e6edf3; cursor:pointer; "
-        f'font-weight:600; font-size:0.9em; margin-bottom:8px; width:100%;">'
-        f'<img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" '
-        f'width="18" height="18" style="margin:0;"> '
-        f"Sign in with Google</button>",
-        unsafe_allow_html=True,
+    # Use Streamlit's native link_button instead of custom HTML.
+    # Streamlit sanitizes most custom <button onclick> and <a target="_top">
+    # HTML, so link_button is the reliable way to render a clickable link that
+    # navigates the top-level browser window. Streamlit implements the navigation
+    # using its own mechanism that correctly escapes the iframe.
+    st.link_button(
+        "🔵 Sign in with Google",
+        auth_url,
+        use_container_width=True,
     )
 
     # ── Email sign-in ──
