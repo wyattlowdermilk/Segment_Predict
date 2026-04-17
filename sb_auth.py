@@ -113,7 +113,16 @@ def _get_redirect_url() -> str:
 
         _headers = _ctx.headers
         host = _headers.get("Host", "localhost:8501")
-        proto = _headers.get("X-Forwarded-Proto", "http")
+
+        # X-Forwarded-Proto is the canonical source, but some reverse proxies
+        # strip or misreport it. Anything that isn't localhost is served over
+        # HTTPS in practice (Streamlit Cloud, Render, Fly, etc.), so force
+        # https there and only use http for local dev.
+        if host.startswith("localhost") or host.startswith("127.0.0.1"):
+            proto = "http"
+        else:
+            proto = _headers.get("X-Forwarded-Proto", "https")
+
         return f"{proto}://{host}/"
     except Exception:
         return "http://localhost:8501/"
