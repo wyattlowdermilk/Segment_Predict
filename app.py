@@ -861,6 +861,11 @@ REGIONS = {
     "Weddington, NC": {"lat": 34.9901, "lon": -80.7812, "min_athletes": 200},
     "Portland, OR": {"lat": 45.5152, "lon": -122.6784, "min_athletes": 1500},
     "Coraopolis, PA": {"lat": 40.4978, "lon": -80.1156, "min_athletes": 200},
+    "Pittsburgh, PA": {"lat": 40.4406, "lon": -79.9959, "min_athletes": 500},
+    "Cary, NC": {"lat": 35.7915, "lon": -78.7811, "min_athletes": 300},
+    "Oakland, CA": {"lat": 37.8044, "lon": -122.2712, "min_athletes": 1500},
+    "Cincinnati, OH": {"lat": 39.1031, "lon": -84.5120, "min_athletes": 300},
+    "Blacksburg, VA": {"lat": 37.2296, "lon": -80.4139, "min_athletes": 100},
 }
 
 
