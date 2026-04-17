@@ -193,7 +193,7 @@ def login_ui(sb: Client):
     auth_url = _build_google_auth_url()
 
     st.markdown(
-        f'<a href="{auth_url}" target="_top" style="'
+        f'<a href="{auth_url}" target="_top" referrerpolicy="no-referrer" style="'
         f"display:flex; align-items:center; justify-content:center; gap:8px; "
         f"padding:10px 16px; border-radius:8px; "
         f"background:#2d333b; border:1px solid #444c56; "
