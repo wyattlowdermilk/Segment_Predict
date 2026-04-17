@@ -3309,7 +3309,7 @@ def main():
             <style>
               .t2-metric-grid {{
                 display: grid;
-                grid-template-columns: 1.4fr 1.4fr 1.4fr 1fr;
+                grid-template-columns: 1.7fr 1.5fr 1.3fr 1fr;
                 gap: 10px 6px;
                 margin: 4px 0 12px 0;
               }}
