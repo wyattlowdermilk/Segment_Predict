@@ -103,6 +103,11 @@ def _build_google_auth_url():
         "redirect_to": redirect_url,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
+        # Force Google to show its account picker directly instead of bouncing
+        # through the accountchooser intermediate page. On some hosting configs
+        # (including Streamlit Cloud), accountchooser returns 403 for reasons
+        # that are opaque; prompt=select_account sidesteps it entirely.
+        "prompt": "select_account",
     }
     return f"{url}/auth/v1/authorize?{urllib.parse.urlencode(params)}"
 
