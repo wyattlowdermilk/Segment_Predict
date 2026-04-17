@@ -527,7 +527,12 @@ def estimate_time_with_entrance_speed(
     elapsed_time = 0
 
     speed_profile = [current_speed]
-    max_iterations = 2000
+    # Scale iteration cap with segment length — cover any realistic segment
+    # even at very slow speeds. Assume a 2 mph (0.9 m/s) worst-case floor,
+    # plus a 30-minute buffer, then cap at 4 hours total simulated time.
+    worst_case_time_s = (distance_m / 0.9) + 1800
+    max_iterations = min(int(worst_case_time_s / dt), 28800)  # up to 4h @ dt=0.5
+    max_iterations = max(max_iterations, 2000)  # never go below original floor
     iteration = 0
 
     grade_rad = math.atan(avg_grade / 100)
