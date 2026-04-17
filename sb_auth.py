@@ -229,13 +229,56 @@ def login_ui(sb: Client):
             }
         )
 
-    # Use Streamlit's native link_button instead of custom HTML.
-    # Streamlit sanitizes most custom <button onclick> and <a target="_top">
-    # HTML, so link_button is the reliable way to render a clickable link that
-    # navigates the top-level browser window. Streamlit implements the navigation
-    # using its own mechanism that correctly escapes the iframe.
+    # Inject CSS that styles Streamlit's link_button to match Google's
+    # official sign-in button branding. We target the button by wrapping it
+    # in a container with a unique key via st.container and scoping CSS to it.
+    st.markdown(
+        """
+        <style>
+        /* Target the Google sign-in link button specifically */
+        div[data-testid="stLinkButton"] a[href*="/auth/v1/authorize"] {
+            background: #ffffff !important;
+            color: #3c4043 !important;
+            border: 1px solid #dadce0 !important;
+            font-family: 'Roboto', 'Helvetica Neue', Arial, sans-serif !important;
+            font-weight: 500 !important;
+            font-size: 0.95em !important;
+            padding: 10px 16px !important;
+            border-radius: 8px !important;
+            transition: background 0.15s, box-shadow 0.15s;
+        }
+        div[data-testid="stLinkButton"] a[href*="/auth/v1/authorize"]:hover {
+            background: #f8f9fa !important;
+            box-shadow: 0 1px 2px rgba(60,64,67,0.15),
+                        0 1px 3px 1px rgba(60,64,67,0.08);
+        }
+        /* Hide the default icon/arrow Streamlit adds */
+        div[data-testid="stLinkButton"] a[href*="/auth/v1/authorize"] > div > span:first-child svg {
+            display: none;
+        }
+        /* Inject the Google G via pseudo-element using a background image */
+        div[data-testid="stLinkButton"] a[href*="/auth/v1/authorize"] > div::before {
+            content: "";
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            margin-right: 10px;
+            background-image: url("https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg");
+            background-size: contain;
+            background-repeat: no-repeat;
+            vertical-align: middle;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Streamlit's native link_button. Custom HTML <a> tags rendered by
+    # st.markdown trigger a 403 on Google's accountchooser step (reason unclear
+    # but reproducible); link_button navigates using Streamlit's own mechanism
+    # which Google accepts.
     st.link_button(
-        "🔵 Sign in with Google",
+        "Sign in with Google",
         auth_url,
         use_container_width=True,
     )
