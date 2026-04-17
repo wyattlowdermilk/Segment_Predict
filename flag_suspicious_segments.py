@@ -2,6 +2,9 @@
 Flag suspicious segments where the config athlete's estimated time
 under neutral conditions (no wind) is unrealistically fast.
 
+Flagged segments are stored in Supabase (flagged_segments table), which is
+the same source the Streamlit app reads from.
+
 Two rules:
   1. GLOBAL: Flag if estimated time < threshold × KOM (default: 90%).
      Catches segments with GPS issues or bad data everywhere.
@@ -17,10 +20,21 @@ Usage:
     python flag_suspicious_segments.py --state-check CO --min-athletes 200
     python flag_suspicious_segments.py --dry-run                # Preview without writing
     python flag_suspicious_segments.py --threshold 0.85         # Stricter global rule
+
+Credentials:
+    Reads Supabase URL and key from .streamlit/secrets.toml (same file the
+    Streamlit app uses). The secrets.toml must contain:
+
+        [supabase]
+        url = "https://xxxx.supabase.co"
+        key = "your-service-role-or-anon-key"
 """
 
+import os
 import sqlite3
 import sys
+
+import requests
 
 # Re-use the app's imports
 from segment_time_estimator import AthleteProfile, PowerModel, format_time
@@ -48,10 +62,9 @@ except ImportError:
     CRR = 0.004
 
 # Re-use the simulation function from the app
-from app import estimate_time_with_entrance_speed, ensure_flagged_table
+from app import estimate_time_with_entrance_speed
 
 SEGMENTS_DB = "segments.db"
-REQUESTS_DB = "requests.db"
 ENTRANCE_SPEED_MPH = 20  # Default neutral entrance speed
 
 # Neutral weather: no wind, standard conditions
@@ -63,12 +76,113 @@ NEUTRAL_WEATHER = {
 }
 
 
+# =============================
+# Supabase credentials loader
+# =============================
+def load_supabase_credentials():
+    """
+    Load Supabase URL and key from .streamlit/secrets.toml.
+
+    Looks for secrets.toml in this order:
+      1. <script_dir>/.streamlit/secrets.toml
+      2. <cwd>/.streamlit/secrets.toml
+    """
+    # Prefer Python 3.11+ stdlib; fall back to `tomli` for older versions
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore
+        except ImportError:
+            print(
+                "ERROR: Python 3.11+ required, or install tomli:\n"
+                "    pip install tomli"
+            )
+            sys.exit(1)
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(script_dir, ".streamlit", "secrets.toml"),
+        os.path.join(os.getcwd(), ".streamlit", "secrets.toml"),
+    ]
+
+    secrets_path = next((p for p in candidates if os.path.exists(p)), None)
+    if secrets_path is None:
+        print("ERROR: Could not find .streamlit/secrets.toml")
+        print("Looked in:")
+        for p in candidates:
+            print(f"  {p}")
+        sys.exit(1)
+
+    with open(secrets_path, "rb") as f:
+        secrets = tomllib.load(f)
+
+    try:
+        url = secrets["supabase"]["url"]
+        key = secrets["supabase"]["key"]
+    except KeyError:
+        print(f"ERROR: {secrets_path} is missing [supabase] url/key entries.")
+        sys.exit(1)
+
+    return url, key
+
+
+def supabase_headers(key: str, extra: dict | None = None) -> dict:
+    """Return standard Supabase REST headers, optionally extended."""
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def fetch_flagged_ids(url: str, key: str) -> set:
+    """Get all already-flagged segment IDs from Supabase."""
+    resp = requests.get(
+        f"{url}/rest/v1/flagged_segments?select=segment_id",
+        headers=supabase_headers(key),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return {row["segment_id"] for row in resp.json()}
+
+
+def upsert_flagged(url: str, key: str, rows: list[dict]) -> int:
+    """
+    Upsert flagged segments to Supabase in a single request.
+    Uses `resolution=merge-duplicates` so existing rows are overwritten.
+    Returns number of rows sent.
+    """
+    if not rows:
+        return 0
+
+    resp = requests.post(
+        f"{url}/rest/v1/flagged_segments",
+        headers=supabase_headers(
+            key,
+            extra={"Prefer": "resolution=merge-duplicates"},
+        ),
+        json=rows,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return len(rows)
+
+
+# =============================
+# Main
+# =============================
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Flag suspicious segments")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Print results without writing to DB"
+        "--dry-run",
+        action="store_true",
+        help="Print results without writing to Supabase",
     )
     parser.add_argument(
         "--threshold",
@@ -98,6 +212,9 @@ def main():
     )
     min_athletes = args.min_athletes
 
+    # Load Supabase credentials up front so we fail fast if they're missing
+    supabase_url, supabase_key = load_supabase_credentials()
+
     # Create athlete from config defaults
     power_curve = {1: POWER_1_MIN, 3: POWER_3_MIN, 8: POWER_8_MIN, 20: POWER_20_MIN}
     athlete = AthleteProfile(
@@ -107,9 +224,6 @@ def main():
         cda=CDA_M2,
         crr=CRR,
     )
-
-    # Ensure flagged table exists
-    ensure_flagged_table(REQUESTS_DB)
 
     # Load all segments
     conn = sqlite3.connect(SEGMENTS_DB)
@@ -127,17 +241,14 @@ def main():
         "SELECT segment_id, MIN(time_seconds) FROM leaderboard GROUP BY segment_id"
     ).fetchall()
     kom_map = {row[0]: row[1] for row in kom_rows if row[1]}
-
-    # Load already-flagged (from requests DB)
-    conn_req = sqlite3.connect(REQUESTS_DB)
-    already_flagged = set(
-        row[0]
-        for row in conn_req.execute(
-            "SELECT segment_id FROM flagged_segments"
-        ).fetchall()
-    )
-    conn_req.close()
     conn.close()
+
+    # Load already-flagged IDs from Supabase
+    try:
+        already_flagged = fetch_flagged_ids(supabase_url, supabase_key)
+    except requests.RequestException as e:
+        print(f"ERROR: Could not fetch flagged_segments from Supabase: {e}")
+        sys.exit(1)
 
     print(
         f"Config athlete: {POWER_1_MIN}W/1min, {POWER_3_MIN}W/3min, "
@@ -153,8 +264,8 @@ def main():
             f"{min_athletes}+ athletes AND estimated < KOM → flag"
         )
     print(f"Segments to test: {len(segments)}")
-    print(f"Already excluded: {len(already_flagged)}")
-    print(f"{'DRY RUN' if dry_run else 'LIVE — will write to DB'}")
+    print(f"Already excluded (in Supabase): {len(already_flagged)}")
+    print(f"{'DRY RUN' if dry_run else 'LIVE — will write to Supabase'}")
     print("-" * 80)
 
     to_flag = []
@@ -244,15 +355,15 @@ def main():
     print(f"Segments to exclude: {len(to_flag)}")
 
     if to_flag and not dry_run:
-        conn = sqlite3.connect(REQUESTS_DB)
-        for seg in to_flag:
-            conn.execute(
-                "INSERT OR REPLACE INTO flagged_segments (segment_id, reason) VALUES (?, ?)",
-                (seg["id"], seg["reason"]),
-            )
-        conn.commit()
-        conn.close()
-        print(f"Wrote {len(to_flag)} segments to flagged_segments table.")
+        rows = [{"segment_id": seg["id"], "reason": seg["reason"]} for seg in to_flag]
+        try:
+            n = upsert_flagged(supabase_url, supabase_key, rows)
+            print(f"Wrote {n} segments to Supabase flagged_segments table.")
+        except requests.RequestException as e:
+            print(f"ERROR: Supabase upsert failed: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                print(f"Response body: {e.response.text}")
+            sys.exit(1)
     elif to_flag:
         print("Dry run — no changes written. Remove --dry-run to apply.")
     else:

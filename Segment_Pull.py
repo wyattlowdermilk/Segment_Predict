@@ -29,12 +29,16 @@ REGIONS = {
     # "Portland, OR": {"lat": 45.5152, "lon": -122.6784}, #Center Portland
     "Portland, OR": {"lat": 45.599, "lon": -122.823},  # looking for Larch
     "Coraopolis, PA": {"lat": 40.4978, "lon": -80.1156},
-    "Pittsburgh, PA": {"lat": 40.416, "lon": -79.96},
+    "Pittsburgh, PA": {"lat": 40.4406, "lon": -79.9959},
+    "Cary, NC": {"lat": 35.7915, "lon": -78.7811},
+    "Oakland, CA": {"lat": 37.8044, "lon": -122.2712},
+    "Cincinnati, OH": {"lat": 39.1031, "lon": -84.5120},
+    "Blacksburg, VA": {"lat": 37.2296, "lon": -80.4139},
 }
 
 # ---- Configure these two values ----
-SELECTED_REGION = "Boulder, CO"
-BOX_RADIUS_MILES = 3
+SELECTED_REGION = "Cincinnati, OH"
+BOX_RADIUS_MILES = 10
 
 # -------------------------------------
 
@@ -63,7 +67,7 @@ GRID_COLS = 3
 # =======================
 # Segment quality filters
 # =======================
-MIN_AVG_GRADE = 4  # % — minimum average gradient
+MIN_AVG_GRADE = 3  # % — minimum average gradient
 MAX_AVG_GRADE = 25  # % — cap to exclude bad data / stair anomalies
 MIN_ELEV_GAIN = 30  # meters — minimum total elevation gain
 MIN_DISTANCE = 400  # meters — minimum segment length

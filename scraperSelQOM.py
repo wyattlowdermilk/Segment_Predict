@@ -25,6 +25,12 @@ STRAVA_COOKIE_VALUE = (
 )
 
 # -------------------------------
+# Gender filter — this script pulls the WOMEN'S (QOM) leaderboard
+# -------------------------------
+GENDER_FILTER = "F"  # "F" = women, "M" = men, None = overall
+LEADERBOARD_TABLE = "leaderboard_qom"
+
+# -------------------------------
 # Selenium setup
 # -------------------------------
 options = Options()
@@ -40,10 +46,10 @@ driver = webdriver.Edge(options=options, service=EdgeService(EDGE_DRIVER_PATH))
 conn = sqlite3.connect(DB_FILE)
 cur = conn.cursor()
 
-# Create leaderboard table if it doesn't exist
+# Create QOM leaderboard table if it doesn't exist (same schema as `leaderboard`)
 cur.execute(
-    """
-    CREATE TABLE IF NOT EXISTS leaderboard (
+    f"""
+    CREATE TABLE IF NOT EXISTS {LEADERBOARD_TABLE} (
         segment_id INTEGER,
         rank INTEGER,
         athlete_name TEXT,
@@ -91,13 +97,15 @@ def time_to_seconds(t):
 
 
 # -------------------------------
-# Get segments WITHOUT leaderboard data
+# Get segments WITHOUT QOM leaderboard data
 # -------------------------------
+# NOTE: we LEFT JOIN against the QOM table specifically, so segments that
+# already have an overall leaderboard but no QOM data will still be scraped.
 cur.execute(
-    """
-    SELECT s.id, s.name 
+    f"""
+    SELECT s.id, s.name
     FROM segments s
-    LEFT JOIN leaderboard l ON s.id = l.segment_id
+    LEFT JOIN {LEADERBOARD_TABLE} l ON s.id = l.segment_id
     WHERE l.segment_id IS NULL
     ORDER BY s.id
 """
@@ -108,16 +116,16 @@ total_segments = cur.execute("SELECT COUNT(*) FROM segments").fetchone()[0]
 already_scraped = total_segments - len(segments)
 
 print(f"Total segments in DB: {total_segments}")
-print(f"Already scraped: {already_scraped}")
-print(f"New segments to scrape: {len(segments)}")
+print(f"Already have QOM data: {already_scraped}")
+print(f"New segments to scrape (QOM): {len(segments)}")
 
 if len(segments) == 0:
-    print("✅ All segments already have leaderboard data!")
+    print("✅ All segments already have QOM leaderboard data!")
     driver.quit()
     conn.close()
     exit()
 
-print("\nStarting scrape...\n")
+print("\nStarting QOM scrape...\n")
 
 # -------------------------------
 # Set cookie once before the loop
@@ -131,10 +139,13 @@ driver.add_cookie(
 # Scrape leaderboard for each segment
 # -------------------------------
 scraped_count = 0
+empty_count = 0
 error_count = 0
 
 for idx, (seg_id, seg_name) in enumerate(segments, 1):
-    url = f"https://www.strava.com/segments/{seg_id}"
+    # Women's leaderboard URL — filter=overall gives the all-time view,
+    # gender=F restricts it to women's times only (QOM leaderboard)
+    url = f"https://www.strava.com/segments/{seg_id}?filter=overall&gender={GENDER_FILTER}"
     driver.get(url)
 
     print(
@@ -150,20 +161,28 @@ for idx, (seg_id, seg_name) in enumerate(segments, 1):
             )
         )
     except:
-        print("⚠️  leaderboard not loaded")
-
-        # Debug info
+        # Could be an empty QOM board, or could be a real failure — check the DOM
         soup = BeautifulSoup(driver.page_source, "html.parser")
+
+        if "login" in driver.current_url.lower():
+            print("❌ Session expired! Update STRAVA_COOKIE_VALUE")
+            error_count += 1
+            break
+
+        # Is the leaderboard table present but empty? (legit — no QOM entries)
+        empty_board = soup.select_one("table.table-leaderboard")
+        if empty_board is not None:
+            print("— no QOM entries (empty women's board)")
+            empty_count += 1
+            time.sleep(2)
+            continue
+
         tables = soup.find_all("table")
         if tables:
-            print(f"     Found {len(tables)} table(s) but not leaderboard")
+            print(f"⚠️  found {len(tables)} table(s) but not leaderboard")
         else:
-            print(f"     No tables found — possibly logged out")
+            print("⚠️  no tables found")
             print(f"     Current URL: {driver.current_url}")
-            if "login" in driver.current_url.lower():
-                print("     ❌ Session expired! Update STRAVA_COOKIE_VALUE")
-                error_count += 1
-                break
 
         error_count += 1
         time.sleep(2)
@@ -229,8 +248,8 @@ for idx, (seg_id, seg_name) in enumerate(segments, 1):
     # Insert into DB
     if leaderboard:
         cur.executemany(
-            """
-            INSERT OR REPLACE INTO leaderboard
+            f"""
+            INSERT OR REPLACE INTO {LEADERBOARD_TABLE}
             (segment_id, rank, athlete_name, time_seconds, date, speed, heart_rate, power, vam)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -240,18 +259,18 @@ for idx, (seg_id, seg_name) in enumerate(segments, 1):
         cur.execute(
             "INSERT INTO pipeline_log (action, segment_id, detail, source) VALUES (?, ?, ?, ?)",
             (
-                "leaderboard_scraped",
+                "leaderboard_qom_scraped",
                 seg_id,
                 f"{len(leaderboard)} entries",
-                "scraperSel",
+                "QOMscraperSel",
             ),
         )
         conn.commit()
         print(f"✅ scraped {len(leaderboard)} entries")
         scraped_count += 1
     else:
-        print("⚠️  no entries found")
-        error_count += 1
+        print("— no QOM entries found")
+        empty_count += 1
 
     time.sleep(2)  # avoid rate limits / anti-bot
 
@@ -262,12 +281,13 @@ conn.close()
 # Summary
 # -------------------------------
 print("\n" + "=" * 70)
-print("Scraping Complete!")
+print("QOM Scraping Complete!")
 print("=" * 70)
 print(f"Total segments to scrape: {len(segments)}")
 print(f"Successfully scraped: {scraped_count}")
-print(f"Errors/Empty: {error_count}")
-print(f"\nTotal in leaderboard table: {already_scraped + scraped_count}")
+print(f"Empty QOM boards: {empty_count}")
+print(f"Errors: {error_count}")
+print(f"\nTotal in {LEADERBOARD_TABLE} table: {already_scraped + scraped_count}")
 print("=" * 70)
 
 if error_count > 0:
