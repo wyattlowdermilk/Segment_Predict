@@ -114,10 +114,8 @@ def _get_redirect_url() -> str:
         _headers = _ctx.headers
         host = _headers.get("Host", "localhost:8501")
 
-        # X-Forwarded-Proto is the canonical source, but some reverse proxies
-        # strip or misreport it. Anything that isn't localhost is served over
-        # HTTPS in practice (Streamlit Cloud, Render, Fly, etc.), so force
-        # https there and only use http for local dev.
+        # X-Forwarded-Proto is unreliable on Streamlit Cloud. Force https for
+        # anything that isn't localhost; only use http for local dev.
         if host.startswith("localhost") or host.startswith("127.0.0.1"):
             proto = "http"
         else:
@@ -189,14 +187,13 @@ def login_ui(sb: Client):
         return _wrap_user(st.session_state["_supabase_user"])
 
     # ── Google sign-in button ──
-    # Always generate a fresh auth URL. Caching this in session_state caused
-    # 403s when the page rerendered: Streamlit reuses the cached URL (same
-    # code_challenge) for the whole session, but Supabase only allows each
-    # challenge to be redeemed once. Stale cached URLs → 403.
+    # Always generate a fresh auth URL. PKCE challenges can only be redeemed
+    # once, so caching the URL in session_state would break retry after a
+    # cancelled or failed sign-in.
     auth_url = _build_google_auth_url()
 
     st.markdown(
-        f'<a href="{auth_url}" target="_self" style="'
+        f'<a href="{auth_url}" target="_top" style="'
         f"display:flex; align-items:center; justify-content:center; gap:8px; "
         f"padding:10px 16px; border-radius:8px; "
         f"background:#2d333b; border:1px solid #444c56; "
