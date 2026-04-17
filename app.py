@@ -3318,7 +3318,7 @@ def main():
                 min-width: 0;
               }}
               .t2-metric-label {{
-                font-size: 0.62rem;
+                font-size: 0.78rem;
                 color: rgba(250, 250, 250, 0.6);
                 line-height: 1.2;
                 margin-bottom: 2px;
@@ -3328,7 +3328,7 @@ def main():
                 text-overflow: ellipsis;
               }}
               .t2-metric-value {{
-                font-size: 0.95rem;
+                font-size: 1.19rem;
                 font-weight: 600;
                 color: inherit;
                 line-height: 1.2;
