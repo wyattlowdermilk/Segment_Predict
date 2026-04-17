@@ -6,3 +6,4 @@ scipy
 matplotlib
 altair
 beautifulsoup4
+supabase
