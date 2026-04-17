@@ -3298,33 +3298,43 @@ def main():
         _kom_display = format_time(kom_time) if kom_time else "—"
 
         # ── Top metrics layout ──
-        # Mobile: single HTML grid, 2 columns × 4 rows, guaranteed side-by-side
-        # at any viewport width (no dependence on Streamlit's column behavior).
+        # Mobile: single HTML grid, 4 columns × 2 rows.
+        #   Row 1: Distance | Elev Gain | Avg Grade | KOM
+        #   Row 2: Est Time | Avg Speed | Power | (blank)
+        # Pure HTML/CSS — not st.columns — so layout is guaranteed at any
+        # viewport width regardless of Streamlit's auto-collapse behavior.
         # Desktop: 4-column row of st.metric widgets.
         if IS_MOBILE:
             _metric_html = f"""
             <style>
               .t2-metric-grid {{
                 display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 8px 12px;
+                grid-template-columns: 1fr 1fr 1fr 1fr;
+                gap: 10px 6px;
                 margin: 4px 0 12px 0;
               }}
               .t2-metric-cell {{
-                padding: 4px 0;
+                padding: 2px 0;
+                min-width: 0;
               }}
               .t2-metric-label {{
-                font-size: 0.72rem;
+                font-size: 0.62rem;
                 color: rgba(250, 250, 250, 0.6);
                 line-height: 1.2;
                 margin-bottom: 2px;
                 text-transform: none;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
               }}
               .t2-metric-value {{
-                font-size: 1.25rem;
+                font-size: 0.95rem;
                 font-weight: 600;
                 color: inherit;
                 line-height: 1.2;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
               }}
             </style>
             <div class="t2-metric-grid">
@@ -3333,28 +3343,28 @@ def main():
                 <div class="t2-metric-value">{_dist_display}</div>
               </div>
               <div class="t2-metric-cell">
-                <div class="t2-metric-label">⏱️ Estimated Time</div>
-                <div class="t2-metric-value">{_time_display}</div>
-              </div>
-              <div class="t2-metric-cell">
-                <div class="t2-metric-label">Elevation Gain</div>
+                <div class="t2-metric-label">Elev Gain</div>
                 <div class="t2-metric-value">{_elev_display}</div>
               </div>
               <div class="t2-metric-cell">
-                <div class="t2-metric-label">🏁 Average Speed</div>
-                <div class="t2-metric-value">{_speed_display}</div>
-              </div>
-              <div class="t2-metric-cell">
-                <div class="t2-metric-label">Average Grade</div>
+                <div class="t2-metric-label">Avg Grade</div>
                 <div class="t2-metric-value">{_grade_display}</div>
-              </div>
-              <div class="t2-metric-cell">
-                <div class="t2-metric-label">⚡ Power</div>
-                <div class="t2-metric-value">{_power_display}</div>
               </div>
               <div class="t2-metric-cell">
                 <div class="t2-metric-label">🏆 {_bench_label}</div>
                 <div class="t2-metric-value">{_kom_display}</div>
+              </div>
+              <div class="t2-metric-cell">
+                <div class="t2-metric-label">⏱️ Est. Time</div>
+                <div class="t2-metric-value">{_time_display}</div>
+              </div>
+              <div class="t2-metric-cell">
+                <div class="t2-metric-label">🏁 Avg Speed</div>
+                <div class="t2-metric-value">{_speed_display}</div>
+              </div>
+              <div class="t2-metric-cell">
+                <div class="t2-metric-label">⚡ Power</div>
+                <div class="t2-metric-value">{_power_display}</div>
               </div>
               <div class="t2-metric-cell"></div>
             </div>
