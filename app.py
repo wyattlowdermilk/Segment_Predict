@@ -3113,26 +3113,72 @@ def main():
         # Get KOM/QOM time for this segment (based on Show QOM toggle)
         kom_time = _get_kom_time(DB_PATH, int(segment_id), use_qom=show_qom)
 
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            if use_metric:
-                st.metric("Distance", f"{segment_data['distance_m']/1000:.2f} km")
-            else:
+        # ── Top metrics layout ──
+        # Desktop: one 4-column row (Distance / Elev / Grade / KOM).
+        # Mobile: two columns side-by-side — static segment metrics on the
+        # left, placeholders for the simulated results (Est Time / Avg Speed
+        # / Power) on the right. The placeholders are filled in later, once
+        # the physics simulation has run with the user's selected parameters.
+        _mobile_est_time_slot = None
+        _mobile_speed_slot = None
+        _mobile_power_slot = None
+        if IS_MOBILE:
+            _left_col, _right_col = st.columns(2)
+            with _left_col:
+                if use_metric:
+                    st.metric("Distance", f"{segment_data['distance_m']/1000:.2f} km")
+                else:
+                    st.metric(
+                        "Distance",
+                        f"{segment_data['distance_m']/1000 * 0.621371:.2f} mi",
+                    )
+                if use_metric:
+                    st.metric(
+                        "Elevation Gain", f"{segment_data['elevation_gain_m']:.0f} m"
+                    )
+                else:
+                    st.metric(
+                        "Elevation Gain",
+                        f"{segment_data['elevation_gain_m'] * 3.28084:.0f} ft",
+                    )
+                st.metric("Average Grade", f"{segment_data['avg_grade']:.1f}%")
                 st.metric(
-                    "Distance", f"{segment_data['distance_m']/1000 * 0.621371:.2f} mi"
+                    f"🏆 {_bench_label}",
+                    format_time(kom_time) if kom_time else "—",
                 )
-        with col2:
-            if use_metric:
-                st.metric("Elevation Gain", f"{segment_data['elevation_gain_m']:.0f} m")
-            else:
+            with _right_col:
+                # Reserve slots for simulated results — filled in after the
+                # physics simulation completes further down.
+                _mobile_est_time_slot = st.empty()
+                _mobile_speed_slot = st.empty()
+                _mobile_power_slot = st.empty()
+        else:
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                if use_metric:
+                    st.metric("Distance", f"{segment_data['distance_m']/1000:.2f} km")
+                else:
+                    st.metric(
+                        "Distance",
+                        f"{segment_data['distance_m']/1000 * 0.621371:.2f} mi",
+                    )
+            with col2:
+                if use_metric:
+                    st.metric(
+                        "Elevation Gain", f"{segment_data['elevation_gain_m']:.0f} m"
+                    )
+                else:
+                    st.metric(
+                        "Elevation Gain",
+                        f"{segment_data['elevation_gain_m'] * 3.28084:.0f} ft",
+                    )
+            with col3:
+                st.metric("Average Grade", f"{segment_data['avg_grade']:.1f}%")
+            with col4:
                 st.metric(
-                    "Elevation Gain",
-                    f"{segment_data['elevation_gain_m'] * 3.28084:.0f} ft",
+                    f"🏆 {_bench_label}",
+                    format_time(kom_time) if kom_time else "—",
                 )
-        with col3:
-            st.metric("Average Grade", f"{segment_data['avg_grade']:.1f}%")
-        with col4:
-            st.metric(f"🏆 {_bench_label}", format_time(kom_time) if kom_time else "—")
 
         # Compute sustainable power for this segment duration
         # First pass: estimate duration using a rough power guess, then refine
@@ -3353,7 +3399,11 @@ def main():
         )
 
         with col_results:
-            st.caption("**Results**")
+            # Results caption only makes sense on desktop — on mobile, the
+            # Est Time / Avg Speed / Power metrics render in the top-right
+            # column instead of here.
+            if not IS_MOBILE:
+                st.caption("**Results**")
 
             # Estimated time with KOM/QOM delta
             your_time = result["total_time"]
@@ -3366,15 +3416,25 @@ def main():
             else:
                 time_display = format_time(your_time)
 
-            st.metric("⏱️ Estimated Time", time_display)
-
             avg_speed_mph = result["cruise_speed_mph"]
             if use_metric:
-                st.metric("🏁 Average Speed", f"{avg_speed_mph * 1.60934:.1f} km/h")
+                _speed_display = f"{avg_speed_mph * 1.60934:.1f} km/h"
             else:
-                st.metric("🏁 Average Speed", f"{avg_speed_mph:.1f} mph")
+                _speed_display = f"{avg_speed_mph:.1f} mph"
+            _power_display = f"{target_power:.0f} W"
 
-            st.metric("⚡ Power", f"{target_power:.0f} W")
+            # On mobile, fill the placeholders that were reserved at the top
+            # of the page so Est Time / Avg Speed / Power appear in the right
+            # column next to Distance / Elev / Grade / KOM, per mobile layout.
+            if IS_MOBILE and _mobile_est_time_slot is not None:
+                _mobile_est_time_slot.metric("⏱️ Estimated Time", time_display)
+                _mobile_speed_slot.metric("🏁 Average Speed", _speed_display)
+                _mobile_power_slot.metric("⚡ Power", _power_display)
+            else:
+                # Desktop: render in the results column as before.
+                st.metric("⏱️ Estimated Time", time_display)
+                st.metric("🏁 Average Speed", _speed_display)
+                st.metric("⚡ Power", _power_display)
 
         with col_elev:
             st.caption("**Elevation Profile**")
