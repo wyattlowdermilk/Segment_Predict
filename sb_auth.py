@@ -197,38 +197,6 @@ def login_ui(sb: Client):
     # cancelled or failed sign-in.
     auth_url = _build_google_auth_url()
 
-    # ── TEMPORARY DEBUG: remove this block once sign-in works ──
-    with st.expander("🔧 Debug: OAuth diagnostics", expanded=False):
-        try:
-            from streamlit import context as _dbg_ctx
-
-            _dbg_headers = (
-                dict(_dbg_ctx.headers) if hasattr(_dbg_ctx, "headers") else {}
-            )
-        except Exception as _dbg_e:
-            _dbg_headers = {"_error": str(_dbg_e)}
-        st.write("**Redirect URL being sent to Supabase:**")
-        st.code(_get_redirect_url())
-        st.write("**Full Supabase authorize URL:**")
-        st.code(auth_url)
-        st.write("**Headers seen by the app:**")
-        st.json(
-            {
-                k: v
-                for k, v in _dbg_headers.items()
-                if k.lower()
-                in (
-                    "host",
-                    "x-forwarded-proto",
-                    "x-forwarded-host",
-                    "x-forwarded-for",
-                    "referer",
-                    "origin",
-                    "user-agent",
-                )
-            }
-        )
-
     # Render a Google-branded sign-in button using components.v1.html.
     # Inside that iframe we have full control over HTML/CSS/JS, and JS can
     # navigate the top browser window via window.top.location.href — the same
@@ -250,22 +218,23 @@ def login_ui(sb: Client):
             width: 100%;
             padding: 10px 16px;
             border-radius: 8px;
-            background: #ffffff;
-            border: 1px solid #dadce0;
-            color: #3c4043;
+            background: #131314;
+            border: 1px solid #8e918f;
+            color: #ffffff;
             font-family: 'Roboto', 'Helvetica Neue', Arial, sans-serif;
             font-weight: 500;
             font-size: 14px;
             cursor: pointer;
-            transition: background 0.15s, box-shadow 0.15s;
+            transition: background 0.15s, box-shadow 0.15s, border-color 0.15s;
             box-sizing: border-box;
           }}
           .gsi-btn:hover {{
-            background: #f8f9fa;
-            box-shadow: 0 1px 2px rgba(60,64,67,0.15),
-                        0 1px 3px 1px rgba(60,64,67,0.08);
+            background: #2a2a2c;
+            border-color: #ffffff40;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.3),
+                        0 1px 3px 1px rgba(0,0,0,0.15);
           }}
-          .gsi-btn:active {{ background: #f1f3f4; }}
+          .gsi-btn:active {{ background: #1e1e20; }}
           .gsi-btn img {{ width: 18px; height: 18px; flex-shrink: 0; }}
         </style>
         <button class="gsi-btn"
