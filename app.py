@@ -3123,38 +3123,6 @@ def main():
         _mobile_speed_slot = None
         _mobile_power_slot = None
         if IS_MOBILE:
-            # Streamlit's default CSS collapses st.columns into a vertical
-            # stack on narrow viewports (typical phone widths). Override
-            # that behavior for just this block by marking it with a class
-            # and forcing horizontal layout via scoped CSS.
-            st.markdown(
-                """
-                <style>
-                .tab2-mobile-metrics + div [data-testid="stHorizontalBlock"] {
-                    flex-wrap: nowrap !important;
-                    gap: 0.5rem !important;
-                }
-                .tab2-mobile-metrics + div [data-testid="stHorizontalBlock"]
-                    > [data-testid="column"] {
-                    min-width: 0 !important;
-                    flex: 1 1 0 !important;
-                    width: 50% !important;
-                }
-                /* Tighten metric padding on narrow screens */
-                .tab2-mobile-metrics + div [data-testid="stMetric"] {
-                    padding: 0.25rem !important;
-                }
-                .tab2-mobile-metrics + div [data-testid="stMetricValue"] {
-                    font-size: 1.1rem !important;
-                }
-                .tab2-mobile-metrics + div [data-testid="stMetricLabel"] {
-                    font-size: 0.75rem !important;
-                }
-                </style>
-                <div class="tab2-mobile-metrics"></div>
-                """,
-                unsafe_allow_html=True,
-            )
             _left_col, _right_col = st.columns(2)
             with _left_col:
                 if use_metric:
