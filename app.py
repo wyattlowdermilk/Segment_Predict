@@ -538,7 +538,15 @@ def estimate_time_with_entrance_speed(
     elapsed_time = 0
 
     speed_profile = [current_speed]
-    max_iterations = 2000
+    # Scale iteration cap to segment distance so long segments (e.g. 6+ mile
+    # climbs like Strava segment 659554) don't get cut off at the cap.
+    # Assumes a conservative minimum speed of 2 m/s (~4.5 mph) with a 50%
+    # safety margin on simulated time. Floor of 2000 for short segments.
+    # IMPORTANT: if you tune this, keep it here — the refinement loop below
+    # reuses this same variable.
+    min_expected_speed_ms = 2.0
+    max_sim_seconds = (distance_m / min_expected_speed_ms) * 1.5
+    max_iterations = max(2000, int(max_sim_seconds / dt))
     iteration = 0
 
     grade_rad = math.atan(avg_grade / 100)
@@ -3309,7 +3317,7 @@ def main():
             <style>
               .t2-metric-grid {{
                 display: grid;
-                grid-template-columns: 1.6fr 1.4fr 1.3fr 1fr;
+                grid-template-columns: 1.7fr 1.5fr 1.2fr 1fr;
                 gap: 10px 6px;
                 margin: 4px 0 12px 0;
               }}
