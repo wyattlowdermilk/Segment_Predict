@@ -44,3 +44,9 @@ Thumbs.db
 # Temp files
 *.tmp
 *_pkce_verifier.json
+
+Segment_Pull.py
+scraperSel.py
+scraperSelQOM.py
+flag_suspicious_segments.py
+Fill_and_Clean_Elevation.py
