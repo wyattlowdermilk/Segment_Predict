@@ -229,58 +229,53 @@ def login_ui(sb: Client):
             }
         )
 
-    # Inject CSS that styles Streamlit's link_button to match Google's
-    # official sign-in button branding. We target the button by wrapping it
-    # in a container with a unique key via st.container and scoping CSS to it.
-    st.markdown(
-        """
+    # Render a Google-branded sign-in button using components.v1.html.
+    # Inside that iframe we have full control over HTML/CSS/JS, and JS can
+    # navigate the top browser window via window.top.location.href — the same
+    # mechanism st.link_button uses internally, which we confirmed Google
+    # accepts. A plain <a> in st.markdown fails because Streamlit's HTML
+    # sanitization strips certain attributes that matter for navigation.
+    _js_safe_url = auth_url.replace("'", "\\'").replace('"', "&quot;")
+    import streamlit.components.v1 as _components
+
+    _components.html(
+        f"""
         <style>
-        /* Target the Google sign-in link button specifically */
-        div[data-testid="stLinkButton"] a[href*="/auth/v1/authorize"] {
-            background: #ffffff !important;
-            color: #3c4043 !important;
-            border: 1px solid #dadce0 !important;
-            font-family: 'Roboto', 'Helvetica Neue', Arial, sans-serif !important;
-            font-weight: 500 !important;
-            font-size: 0.95em !important;
-            padding: 10px 16px !important;
-            border-radius: 8px !important;
+          html, body {{ margin: 0; padding: 0; background: transparent; }}
+          .gsi-btn {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            width: 100%;
+            padding: 10px 16px;
+            border-radius: 8px;
+            background: #ffffff;
+            border: 1px solid #dadce0;
+            color: #3c4043;
+            font-family: 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+            font-weight: 500;
+            font-size: 14px;
+            cursor: pointer;
             transition: background 0.15s, box-shadow 0.15s;
-        }
-        div[data-testid="stLinkButton"] a[href*="/auth/v1/authorize"]:hover {
-            background: #f8f9fa !important;
+            box-sizing: border-box;
+          }}
+          .gsi-btn:hover {{
+            background: #f8f9fa;
             box-shadow: 0 1px 2px rgba(60,64,67,0.15),
                         0 1px 3px 1px rgba(60,64,67,0.08);
-        }
-        /* Hide the default icon/arrow Streamlit adds */
-        div[data-testid="stLinkButton"] a[href*="/auth/v1/authorize"] > div > span:first-child svg {
-            display: none;
-        }
-        /* Inject the Google G via pseudo-element using a background image */
-        div[data-testid="stLinkButton"] a[href*="/auth/v1/authorize"] > div::before {
-            content: "";
-            display: inline-block;
-            width: 18px;
-            height: 18px;
-            margin-right: 10px;
-            background-image: url("https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg");
-            background-size: contain;
-            background-repeat: no-repeat;
-            vertical-align: middle;
-        }
+          }}
+          .gsi-btn:active {{ background: #f1f3f4; }}
+          .gsi-btn img {{ width: 18px; height: 18px; flex-shrink: 0; }}
         </style>
+        <button class="gsi-btn"
+                onclick="window.top.location.href='{_js_safe_url}'">
+          <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
+               alt="">
+          <span>Sign in with Google</span>
+        </button>
         """,
-        unsafe_allow_html=True,
-    )
-
-    # Streamlit's native link_button. Custom HTML <a> tags rendered by
-    # st.markdown trigger a 403 on Google's accountchooser step (reason unclear
-    # but reproducible); link_button navigates using Streamlit's own mechanism
-    # which Google accepts.
-    st.link_button(
-        "Sign in with Google",
-        auth_url,
-        use_container_width=True,
+        height=50,
     )
 
     # ── Email sign-in ──
