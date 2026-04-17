@@ -712,6 +712,7 @@ def find_tailwind_segments(
     time_range: tuple = (10, 1800),
     min_tailwind_pct: float = 50.0,
     min_athletes: int = 0,
+    use_qom: bool = False,
 ):
     """
     Two-phase segment finder:
@@ -719,7 +720,10 @@ def find_tailwind_segments(
          Keep only those with tailwind_pct >= min_tailwind_pct.
          Also filters out segments with fewer than min_athletes unique athletes.
       2. SIMULATE — run the physics model only on the tailwind survivors,
-         then rank by estimated time closest to KOM (lowest pct_of_kom).
+         then rank by estimated time closest to KOM/QOM (lowest pct_of_kom).
+
+    When use_qom=True, benchmarks against the leaderboard_qom table; segments
+    with no QOM record are skipped (same behavior as missing KOM).
 
     Returns list of dicts sorted by pct_of_kom ascending (best chances first).
     """
@@ -732,7 +736,8 @@ def find_tailwind_segments(
         & (segments_df["avg_grade"] <= max_gradient)
     ].copy()
 
-    # Pre-fetch all KOM times in one query
+    # Pre-fetch all KOM (or QOM) times in one query
+    benchmark_table = "leaderboard_qom" if use_qom else "leaderboard"
     conn = sqlite3.connect(db_path)
     seg_ids = segments_df["id"].tolist()
     if not seg_ids:
@@ -740,7 +745,7 @@ def find_tailwind_segments(
         return []
     placeholders = ",".join("?" * len(seg_ids))
     kom_rows = conn.execute(
-        f"SELECT segment_id, MIN(time_seconds) FROM leaderboard WHERE segment_id IN ({placeholders}) GROUP BY segment_id",
+        f"SELECT segment_id, MIN(time_seconds) FROM {benchmark_table} WHERE segment_id IN ({placeholders}) GROUP BY segment_id",
         seg_ids,
     ).fetchall()
     conn.close()
@@ -1101,12 +1106,19 @@ def _absorb_short_sections(sections_mi, min_mi):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _get_leaderboard(db_path: str, segment_id: int, limit: int = 20):
-    """Cached leaderboard fetch."""
+def _get_leaderboard(
+    db_path: str, segment_id: int, limit: int = 20, use_qom: bool = False
+):
+    """Cached leaderboard fetch.
+
+    When use_qom=True, queries the leaderboard_qom table (female leaderboard)
+    instead of the overall leaderboard.
+    """
+    table = "leaderboard_qom" if use_qom else "leaderboard"
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     cur.execute(
-        "SELECT rank, athlete_name, time_seconds, power, date FROM leaderboard WHERE segment_id = ? ORDER BY time_seconds ASC LIMIT ?",
+        f"SELECT rank, athlete_name, time_seconds, power, date FROM {table} WHERE segment_id = ? ORDER BY time_seconds ASC LIMIT ?",
         (segment_id, limit),
     )
     data = cur.fetchall()
@@ -1115,12 +1127,19 @@ def _get_leaderboard(db_path: str, segment_id: int, limit: int = 20):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _get_kom_time(db_path: str, segment_id: int):
-    """Cached KOM time fetch."""
+def _get_kom_time(db_path: str, segment_id: int, use_qom: bool = False):
+    """Cached KOM (or QOM) time fetch.
+
+    When use_qom=True, returns the top QOM time from leaderboard_qom instead of
+    the overall KOM. Returns None if no record exists in the selected table.
+    Variable name kept as "kom_time" throughout the app for minimal diff —
+    it really represents "benchmark time" when the QOM toggle is on.
+    """
+    table = "leaderboard_qom" if use_qom else "leaderboard"
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     cur.execute(
-        "SELECT MIN(time_seconds) FROM leaderboard WHERE segment_id = ?",
+        f"SELECT MIN(time_seconds) FROM {table} WHERE segment_id = ?",
         (segment_id,),
     )
     result = cur.fetchone()
@@ -1755,6 +1774,18 @@ def main():
         bike_weight = st.slider(
             "Bike Weight (kg)", 6, 15, int(pval("bike_weight_kg", BIKE_WEIGHT_KG))
         )
+        show_qom = st.checkbox(
+            "Show QOM",
+            value=bool(pval("show_qom", False)),
+            key="show_qom_cb",
+            help="Display QOM times and benchmarks instead of KOM. "
+            "Segments without QOM data show '—'.",
+        )
+
+    # Benchmark label used throughout the UI. Driven by the Show QOM toggle.
+    # The DB column and internal variable name stay as "kom_time" for minimal
+    # diff — this label is purely for display.
+    _bench_label = "QOM" if show_qom else "KOM"
 
     with st.sidebar.expander("🚴 Equipment", expanded=False):
         cda = st.slider(
@@ -1775,78 +1806,33 @@ def main():
             help="0.003=Race tires, 0.005=Training tires",
         )
 
-    with st.sidebar.expander("🏁 Entrance Speed", expanded=False):
-        if use_metric:
-            entrance_speed_kmh = st.slider(
-                "Segment Entry Speed (km/h)",
-                min_value=0,
-                max_value=48,
-                value=26,
-                step=3,
-                help="Speed you'll have when starting each segment",
-            )
-            entrance_speed = (
-                entrance_speed_kmh * 0.621371
-            )  # Convert to mph for internal use
-        else:
-            entrance_speed = st.slider(
-                "Segment Entry Speed (mph)",
-                min_value=0,
-                max_value=30,
-                value=16,
-                step=2,
-                help="Speed you'll have when starting each segment",
-            )
+    # =============================================================================
+    # Entrance Speed — MOVED to Tab 1b (below calendar, alongside filters).
+    # Tab 2 has its own entrance speed slider (entrance_speed_t2).
+    # A default scalar is set here so any code that runs before Tab 1b's widget
+    # renders has a value to fall back on. Tab 1b's widget overwrites it.
+    # =============================================================================
+    if use_metric:
+        entrance_speed = 26 * 0.621371  # 26 km/h default, converted to mph
+    else:
+        entrance_speed = 16.0  # mph default
 
-    with st.sidebar.expander("🔍 Segment Filters", expanded=False):
-        # Distance filter — label reflects selected location
-        if use_metric:
-            max_distance_km = st.slider(
-                f"Max distance from {location_name} (km)", 0, 40, 25, 5
-            )
-            max_distance = (
-                max_distance_km * 0.621371
-            )  # Convert to miles for internal use
-        else:
-            max_distance = st.slider(
-                f"Max distance from {location_name} (miles)", 0, 25, 15, 5
-            )
-
-        # Gradient filter
-        gradient_range = st.slider(
-            "Average gradient (%)",
-            min_value=-5,
-            max_value=20,
-            value=(3, 20),
-            step=1,
-            help="Filter segments by average gradient",
-        )
-
-        # Time filter (in minutes, converted to seconds internally)
-        time_range_min = st.slider(
-            "Estimated time (minutes)",
-            min_value=0,
-            max_value=15,
-            value=(0, 15),
-            step=1,
-            help="Filter segments by your estimated completion time",
-        )
-        time_range = (time_range_min[0] * 60, time_range_min[1] * 60)
-
-        # Minimum athletes filter — default varies by region
-        _region_min_athletes = (
-            REGIONS[selected_region].get("min_athletes", 500)
-            if selected_region and selected_region in REGIONS
-            else 500
-        )
-        min_athletes = st.slider(
-            "Min athletes on segment",
-            min_value=10,
-            max_value=10000,
-            value=_region_min_athletes,
-            step=10,
-            help="Only show segments ridden by at least this many unique athletes",
-        )
+    # =============================================================================
+    # Segment Filters — MOVED to Tab 1b (below calendar).
+    # Other tabs (2/4/5/6/Favorites) use wide-open defaults defined here so their
+    # existing filter logic keeps working without a sidebar UI.
+    # Tab 1b will OVERWRITE these values from its own widgets when it renders.
+    # =============================================================================
+    _region_min_athletes = (
+        REGIONS[selected_region].get("min_athletes", 500)
+        if selected_region and selected_region in REGIONS
+        else 500
+    )
+    # Wide-open defaults for tabs 2/4/5/6/Favorites (show everything)
+    max_distance = 25  # miles — generous radius
+    gradient_range = (-5, 20)  # full gradient range
+    time_range = (0, 99999)  # no time limit (seconds)
+    min_athletes = 10  # minimal floor
 
     with st.sidebar.expander("📏 Units", expanded=True):
         use_metric = st.checkbox(
@@ -1880,7 +1866,7 @@ def main():
                         "crr": float(crr),
                         "preferred_region": selected_region or "Seattle, WA",
                         "use_metric": use_metric,
-                        "entrance_speed_mph": float(entrance_speed),
+                        "show_qom": bool(show_qom),
                     },
                 )
                 st.success("✅ Saved!")
@@ -1991,18 +1977,18 @@ def main():
 
                 if seg["time_behind"] < 0:
                     st.success(
-                        f"{your_time_str} ({abs(seg['time_behind']):.0f}s faster than KOM!){wind_adv_str}"
+                        f"{your_time_str} ({abs(seg['time_behind']):.0f}s faster than {_bench_label}!){wind_adv_str}"
                     )
                 elif seg["time_behind"] < 10:
                     st.success(
-                        f"{your_time_str} ({seg['time_behind']:.0f}s slower than KOM){wind_adv_str}"
+                        f"{your_time_str} ({seg['time_behind']:.0f}s slower than {_bench_label}){wind_adv_str}"
                     )
                 else:
                     st.info(
-                        f"{your_time_str} ({seg['time_behind']:.0f}s slower than KOM){wind_adv_str}"
+                        f"{your_time_str} ({seg['time_behind']:.0f}s slower than {_bench_label}){wind_adv_str}"
                     )
 
-                st.caption(f"🏆 KOM: {kom_time_str}")
+                st.caption(f"🏆 {_bench_label}: {kom_time_str}")
 
                 if i < 3:
                     st.markdown("")
@@ -2092,21 +2078,44 @@ def main():
             st.markdown(
                 '<div class="dp-tip">'
                 "💡 <b>Tip:</b> Tap the <b>&gt; arrow in the top left</b> to open the sidebar — "
-                "select your <b>Region</b>, update your <b>Athlete Profile</b> "
-                "(power curve, weight, equipment), "
-                "and adjust <b>Segment Filters</b> (gradient, time range, min athletes)."
+                "select your <b>Region</b> and update your <b>Athlete Profile</b> "
+                "(power curve, weight, equipment). "
+                "Use the <b>Segment Filters</b> below the calendar to refine results."
                 "</div>",
                 unsafe_allow_html=True,
             )
         else:
             st.markdown(
                 '<div class="dp-tip">'
-                "💡 <b>Tip:</b> Use <b>Segment Filters</b> in the sidebar to adjust gradient, "
-                "time range, and minimum athletes — find shorter sprints, longer climbs, "
+                "💡 <b>Tip:</b> Use the <b>Segment Filters</b> below the calendar to adjust gradient, "
+                "distance, time range, and minimum athletes — find shorter sprints, longer climbs, "
                 "or more competitive segments."
                 "</div>",
                 unsafe_allow_html=True,
             )
+
+        # ------------------------------------------------------------------
+        # Tab 1b filter values (widgets render BELOW calendar, but values
+        # must be read from session_state here so segment loading below
+        # uses them. First run uses defaults; subsequent runs pick up user
+        # changes via Streamlit's natural top-to-bottom rerun.
+        # ------------------------------------------------------------------
+        # Distance default (internal value is miles)
+        if use_metric:
+            _default_dist_miles = 25 * 0.621371  # 25 km default
+        else:
+            _default_dist_miles = 15.0  # 15 mi default
+        max_distance = st.session_state.get(
+            "tab1b_max_distance_mi", _default_dist_miles
+        )
+
+        gradient_range = st.session_state.get("tab1b_gradient_range", (3, 20))
+
+        # Time range stored as (min_min, max_min) in MINUTES; convert to seconds
+        _t_min_min, _t_max_min = st.session_state.get("tab1b_time_range_min", (0, 30))
+        time_range = (_t_min_min * 60, _t_max_min * 60)
+
+        min_athletes = st.session_state.get("tab1b_min_athletes", _region_min_athletes)
 
         # Load segments (cached)
         try:
@@ -2249,6 +2258,99 @@ def main():
                 unsafe_allow_html=True,
             )
 
+            # -------------------------------------------------------------
+            # Segment Filters (Tab 1b only) — rendered below the calendar.
+            # Changes here trigger a Streamlit rerun, and the top-of-tab
+            # code picks up the new values from session_state.
+            # -------------------------------------------------------------
+            st.markdown("")
+            st.markdown("##### Segment Filters")
+            # Distance filter — label reflects selected location/units
+            if use_metric:
+                _cur_km = int(round(max_distance / 0.621371))
+                _cur_km = max(0, min(40, _cur_km))
+                _max_km = st.slider(
+                    f"Max distance from {location_name} (km)",
+                    0,
+                    40,
+                    _cur_km,
+                    5,
+                    key="tab1b_max_distance_km",
+                )
+                st.session_state["tab1b_max_distance_mi"] = _max_km * 0.621371
+            else:
+                _cur_mi = int(round(max_distance))
+                _cur_mi = max(0, min(25, _cur_mi))
+                st.slider(
+                    f"Max distance from {location_name} (miles)",
+                    0,
+                    25,
+                    _cur_mi,
+                    5,
+                    key="tab1b_max_distance_mi_widget",
+                )
+                st.session_state["tab1b_max_distance_mi"] = st.session_state[
+                    "tab1b_max_distance_mi_widget"
+                ]
+
+            # Gradient filter
+            st.slider(
+                "Average gradient (%)",
+                min_value=-5,
+                max_value=20,
+                value=gradient_range,
+                step=1,
+                key="tab1b_gradient_range",
+                help="Filter segments by average gradient",
+            )
+
+            # Time filter — 0 to 30 minutes (Tab 1b only)
+            st.slider(
+                "Estimated time (minutes)",
+                min_value=0,
+                max_value=30,
+                value=(_t_min_min, _t_max_min),
+                step=1,
+                key="tab1b_time_range_min",
+                help="Filter segments by your estimated completion time",
+            )
+
+            # Minimum athletes filter
+            st.slider(
+                "Min athletes on segment",
+                min_value=10,
+                max_value=10000,
+                value=min_athletes,
+                step=10,
+                key="tab1b_min_athletes",
+                help="Only show segments ridden by at least this many unique athletes",
+            )
+
+            # Entrance Speed — always visible, not a dropdown
+            st.markdown("")
+            st.markdown("##### Entrance Speed")
+            if use_metric:
+                _es_kmh = st.slider(
+                    "Segment Entry Speed (km/h)",
+                    min_value=0,
+                    max_value=48,
+                    value=26,
+                    step=3,
+                    key="tab1b_entrance_speed_kmh",
+                    help="Speed you'll have when starting each segment",
+                )
+                entrance_speed = _es_kmh * 0.621371  # to mph for internal use
+            else:
+                entrance_speed = st.slider(
+                    "Segment Entry Speed (mph)",
+                    min_value=0,
+                    max_value=30,
+                    value=16,
+                    step=2,
+                    key="tab1b_entrance_speed_mph",
+                    help="Speed you'll have when starting each segment",
+                )
+
         with col_segments:
             # Day selector
             selected_day_label = st.selectbox(
@@ -2303,6 +2405,7 @@ def main():
                         bike_weight,
                         cda,
                         crr,
+                        show_qom,
                     )
                     if (
                         st.session_state.get("_tab1b_fav_cache_key") != _fav_cache_key
@@ -2323,6 +2426,7 @@ def main():
                                 time_range=(0, 9999),
                                 min_tailwind_pct=0,
                                 min_athletes=0,
+                                use_qom=show_qom,
                             )
                             # Sort by wind advantage (most helped first)
                             top_segments_1b = sorted(
@@ -2361,6 +2465,7 @@ def main():
                         frozenset(flagged_ids),
                         selected_day_offset,
                         _today_key_1b,
+                        show_qom,
                     )
                     if (
                         st.session_state.get("_tab1b_cache_key") != _tab1b_cache_key
@@ -2377,6 +2482,7 @@ def main():
                                 gradient_range=gradient_range,
                                 time_range=time_range,
                                 min_athletes=min_athletes,
+                                use_qom=show_qom,
                             )
                         st.session_state["_tab1b_cache_key"] = _tab1b_cache_key
                         st.session_state["_tab1b_segments"] = top_segments_1b
@@ -2392,7 +2498,7 @@ def main():
                     # Track how many to show (3 at a time)
                     _show_key = f"_tab1b_show_count_{selected_day_offset}"
                     if _show_key not in st.session_state:
-                        st.session_state[_show_key] = 3
+                        st.session_state[_show_key] = 4
                     _show_count = min(st.session_state[_show_key], len(top_segments_1b))
 
                     for seg in top_segments_1b[:_show_count]:
@@ -2411,11 +2517,11 @@ def main():
                         else:
                             _badge_base += " padding:4px 0;"
                         if seg["time_behind"] < 0:
-                            kom_badge = f'<div style="background:#166534; color:#bbf7d0; {_badge_base}">{abs(seg["time_behind"]):.0f}s faster than KOM!</div>'
+                            kom_badge = f'<div style="background:#166534; color:#bbf7d0; {_badge_base}">{abs(seg["time_behind"]):.0f}s faster than {_bench_label}!</div>'
                         elif seg["time_behind"] < 10:
-                            kom_badge = f'<div style="background:#854d0e; color:#fef08a; {_badge_base}">{seg["time_behind"]:.0f}s off KOM</div>'
+                            kom_badge = f'<div style="background:#854d0e; color:#fef08a; {_badge_base}">{seg["time_behind"]:.0f}s off {_bench_label}</div>'
                         else:
-                            kom_badge = f'<div style="background:#1e3a5f; color:#bfdbfe; {_badge_base}">{seg["time_behind"]:.0f}s off KOM</div>'
+                            kom_badge = f'<div style="background:#1e3a5f; color:#bfdbfe; {_badge_base}">{seg["time_behind"]:.0f}s off {_bench_label}</div>'
 
                         # Wind insight — single line combining tailwind %, wind speed, and time advantage
                         wind_adv = seg.get("wind_advantage_s", 0)
@@ -2535,7 +2641,7 @@ def main():
                             )
                             card_parts.append(
                                 f'<div style="display:flex; align-items:baseline; gap:8px;">'
-                                f'<div><div style="color:#94a3b8; font-size:0.68em; text-transform:uppercase; letter-spacing:0.04em;">KOM</div>'
+                                f'<div><div style="color:#94a3b8; font-size:0.68em; text-transform:uppercase; letter-spacing:0.04em;">{_bench_label}</div>'
                                 f'<span style="font-size:1.2em; font-weight:700; color:#e2e8f0;">{kom_time_str}</span></div>'
                                 f'<div style="align-self:flex-end; margin-bottom:2px;">{kom_badge}</div>'
                                 f"</div>"
@@ -2598,7 +2704,7 @@ def main():
                                 f'<div><div style="color:#94a3b8; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em;">Power</div><span class="seg-big-num" style="font-size:1.5em; font-weight:700; color:#f59e0b;">{seg["power"]:.0f}<span style="font-size:0.5em; color:#94a3b8;">W</span></span></div>'
                             )
                             card_parts.append(
-                                f'<div><div style="color:#94a3b8; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em;">KOM</div><span class="seg-big-num" style="font-size:1.5em; font-weight:700; color:#e2e8f0;">{kom_time_str}</span></div>'
+                                f'<div><div style="color:#94a3b8; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em;">{_bench_label}</div><span class="seg-big-num" style="font-size:1.5em; font-weight:700; color:#e2e8f0;">{kom_time_str}</span></div>'
                             )
                             card_parts.append("</div></div>")
                             card_parts.append(f'<div style="margin-top:6px;">')
@@ -2660,10 +2766,10 @@ def main():
                     _total_available = len(top_segments_1b)
                     if _show_count < _total_available:
                         _remaining = _total_available - _show_count
-                        _next_batch = min(3, _remaining)
+                        _next_batch = min(4, _remaining)
                         _label = f"Show {_next_batch} more segment{'s' if _next_batch > 1 else ''}"
                         if st.button(_label, key=f"_show_more_{selected_day_offset}"):
-                            st.session_state[_show_key] = _show_count + 3
+                            st.session_state[_show_key] = _show_count + 4
                             st.rerun()
 
                     # Simulator link below all cards
@@ -2806,7 +2912,9 @@ def main():
                         except Exception:
                             wind_impact = 0
 
-                        kom_time = _get_kom_time(DB_PATH, int(seg["id"]))
+                        kom_time = _get_kom_time(
+                            DB_PATH, int(seg["id"]), use_qom=show_qom
+                        )
 
                         if use_metric:
                             dist_val = seg["distance_m"] / 1000
@@ -2826,7 +2934,9 @@ def main():
                                     format_time(your_time) if your_time < 9999 else "—"
                                 ),
                                 "Power": int(power_w) if power_w > 0 else None,
-                                "KOM": format_time(kom_time) if kom_time else "—",
+                                _bench_label: (
+                                    format_time(kom_time) if kom_time else "—"
+                                ),
                                 "Wind": f"{tailwind_pct:.0f}%",
                                 "Impact": (
                                     f"{wind_impact:+.1f}s"
@@ -2863,7 +2973,7 @@ def main():
                         "Grade %",
                         "Est. Time",
                         "Power",
-                        "KOM",
+                        _bench_label,
                         "Wind",
                         "Impact",
                         "Link",
@@ -2898,7 +3008,7 @@ def main():
                             "Power": st.column_config.NumberColumn(
                                 "Power (W)", format="%d"
                             ),
-                            "KOM": st.column_config.TextColumn("KOM"),
+                            _bench_label: st.column_config.TextColumn(_bench_label),
                             "Wind": st.column_config.TextColumn("Tailwind"),
                             "Impact": st.column_config.TextColumn("Wind Δ"),
                             "Link": st.column_config.LinkColumn(
@@ -3000,8 +3110,8 @@ def main():
                     toggle_favorite(sb, str(user.id), int(segment_id))
                     st.rerun()
 
-        # Get KOM time for this segment
-        kom_time = _get_kom_time(DB_PATH, int(segment_id))
+        # Get KOM/QOM time for this segment (based on Show QOM toggle)
+        kom_time = _get_kom_time(DB_PATH, int(segment_id), use_qom=show_qom)
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -3022,7 +3132,7 @@ def main():
         with col3:
             st.metric("Average Grade", f"{segment_data['avg_grade']:.1f}%")
         with col4:
-            st.metric("🏆 KOM", format_time(kom_time) if kom_time else "—")
+            st.metric(f"🏆 {_bench_label}", format_time(kom_time) if kom_time else "—")
 
         # Compute sustainable power for this segment duration
         # First pass: estimate duration using a rough power guess, then refine
@@ -3032,20 +3142,65 @@ def main():
             "elevation_high_m": segment_data["elevation_gain_m"],
             "elevation_low_m": 0,
         }
+
+        # Read Tab 2's own entrance speed AND wind condition from session_state.
+        # The widgets render further down but we need their values here so the
+        # Best Effort / KOM-match calcs reflect current wind and entrance speed.
+        # Falls back to slider defaults on first render.
+        if use_metric:
+            _t2_es_default_kmh = 32
+            _t2_es_raw = st.session_state.get("tab2_entrance", _t2_es_default_kmh)
+            entrance_speed_t2_early = _t2_es_raw * 0.621371  # km/h -> mph
+        else:
+            _t2_es_default_mph = 20
+            entrance_speed_t2_early = st.session_state.get(
+                "tab2_entrance", _t2_es_default_mph
+            )
+
+        # Build the same wind_options dict used by the slider below, so we can
+        # translate the user's selection to wind_speed_ms + wind_angle BEFORE
+        # the slider renders. Kept in sync with the slider block further down.
+        if use_metric:
+            _t2_wind_options = {
+                "16 km/h tailwind": (10, 180),
+                "8 km/h tailwind": (5, 180),
+                "Neutral (0 km/h)": (0, 0),
+                "8 km/h headwind": (5, 0),
+                "16 km/h headwind": (10, 0),
+                "24 km/h headwind": (15, 0),
+            }
+            _t2_wind_default = "Neutral (0 km/h)"
+        else:
+            _t2_wind_options = {
+                "10 mph tailwind": (10, 180),
+                "5 mph tailwind": (5, 180),
+                "Neutral (0 mph)": (0, 0),
+                "5 mph headwind": (5, 0),
+                "10 mph headwind": (10, 0),
+                "15 mph headwind": (15, 0),
+            }
+            _t2_wind_default = "Neutral (0 mph)"
+        _t2_wind_sel_early = st.session_state.get("tab2_wind", _t2_wind_default)
+        _t2_wind_mph_early, _t2_wind_angle_early = _t2_wind_options.get(
+            _t2_wind_sel_early, (0, 0)
+        )
+        _t2_wind_ms_early = _t2_wind_mph_early * 0.44704
+
         weather_est = {
             "temp_c": 15,
             "pressure_hpa": 1013,
-            "wind_speed_ms": 0,
-            "wind_angle": 90,
+            "wind_speed_ms": _t2_wind_ms_early,
+            "wind_angle": _t2_wind_angle_early,
         }
         # Initial guess: use mid-range power to get a time estimate
         initial_guess_power = athlete.sustainable_power(
             3.0
         )  # 3-min power as starting point
+
         est_result = estimate_time_with_entrance_speed(
             segment_dict_est,
             athlete,
-            entrance_speed,
+            entrance_speed_t2_early,
             weather_est,
             target_power=initial_guess_power,
         )
@@ -3062,11 +3217,12 @@ def main():
                 "elevation_high_m": segment_data["elevation_gain_m"],
                 "elevation_low_m": 0,
             }
+            # KOM-match also reflects current wind + entrance speed
             weather_kom = {
                 "temp_c": 15,
                 "pressure_hpa": 1013,
-                "wind_speed_ms": 0,
-                "wind_angle": 90,
+                "wind_speed_ms": _t2_wind_ms_early,
+                "wind_angle": _t2_wind_angle_early,
             }
             lo_p, hi_p = 100, 800
             for _ in range(15):
@@ -3074,7 +3230,7 @@ def main():
                 r_kom = estimate_time_with_entrance_speed(
                     segment_dict_kom,
                     athlete,
-                    entrance_speed,
+                    entrance_speed_t2_early,
                     weather_kom,
                     target_power=mid_p,
                 )
@@ -3087,11 +3243,9 @@ def main():
                     hi_p = mid_p
 
         # Power note
-        power_note = f"Best effort from power curve: **{natural_power:.0f} W**"
+        power_note = f"Best effort for these conditions: **{natural_power:.0f} W**"
         if optimized_power and kom_time:
-            power_note += (
-                f" · To match KOM ({format_time(kom_time)}): **{optimized_power} W**"
-            )
+            power_note += f" · To match {_bench_label} ({format_time(kom_time)}): **{optimized_power} W**"
 
         # Reset power slider when segment changes
         if st.session_state.get("_tab2_segment_id") != segment_id:
@@ -3201,9 +3355,11 @@ def main():
         with col_results:
             st.caption("**Results**")
 
-            # Estimated time with KOM delta
+            # Estimated time with KOM/QOM delta
             your_time = result["total_time"]
-            leaderboard_data = _get_leaderboard(DB_PATH, int(segment_id), 20)
+            leaderboard_data = _get_leaderboard(
+                DB_PATH, int(segment_id), 20, use_qom=show_qom
+            )
             if leaderboard_data and kom_time:
                 time_behind_kom = your_time - kom_time
                 time_display = f"{format_time(your_time)}  ({time_behind_kom:+.0f}s)"
@@ -3300,8 +3456,10 @@ def main():
                 elev_grades = [p[2] if p[2] is not None else 0.0 for p in elev_points]
 
                 # Leaderboard
-                with st.expander("🏆 Full Leaderboard", expanded=False):
-                    leaderboard_data = _get_leaderboard(DB_PATH, int(segment_id), 20)
+                with st.expander(f"🏆 Full {_bench_label} Leaderboard", expanded=False):
+                    leaderboard_data = _get_leaderboard(
+                        DB_PATH, int(segment_id), 20, use_qom=show_qom
+                    )
                     if leaderboard_data:
                         your_time = result["total_time"]
                         lb_df = pd.DataFrame(
@@ -4040,7 +4198,9 @@ def main():
                     "Effect": f"💨 {tailwind_pct:.0f}% tailwind",
                     "Est. Time": format_time(day_time),
                     "Power (W)": f"{day_power:.0f}",
-                    "KOM Power": (f"{day_kom_power}" if day_kom_power else "—"),
+                    f"{_bench_label} Power": (
+                        f"{day_kom_power}" if day_kom_power else "—"
+                    ),
                     "Opt. Time": "—",
                     "Even Time": "—",
                     "Even W": "—",
