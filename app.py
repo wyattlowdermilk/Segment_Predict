@@ -3163,26 +3163,26 @@ def main():
         # Build the same wind_options dict used by the slider below, so we can
         # translate the user's selection to wind_speed_ms + wind_angle BEFORE
         # the slider renders. Kept in sync with the slider block further down.
-        if use_metric:
-            _t2_wind_options = {
-                "16 km/h tailwind": (10, 180),
-                "8 km/h tailwind": (5, 180),
-                "Neutral (0 km/h)": (0, 0),
-                "8 km/h headwind": (5, 0),
-                "16 km/h headwind": (10, 0),
-                "24 km/h headwind": (15, 0),
-            }
-            _t2_wind_default = "Neutral (0 km/h)"
-        else:
-            _t2_wind_options = {
-                "10 mph tailwind": (10, 180),
-                "5 mph tailwind": (5, 180),
-                "Neutral (0 mph)": (0, 0),
-                "5 mph headwind": (5, 0),
-                "10 mph headwind": (10, 0),
-                "15 mph headwind": (15, 0),
-            }
-            _t2_wind_default = "Neutral (0 mph)"
+        # Range: 20 mph tailwind → 20 mph headwind in 2 mph increments.
+        # Underlying speed is always stored in mph; metric labels convert
+        # for display.
+        _t2_wind_options = {}
+        for _mph in range(20, 0, -2):  # 20, 18, 16, ..., 2 (tailwinds)
+            if use_metric:
+                _label = f"{round(_mph * 1.60934)} km/h tailwind"
+            else:
+                _label = f"{_mph} mph tailwind"
+            _t2_wind_options[_label] = (_mph, 180)
+        # Neutral / 0 wind
+        _neutral_label = "Neutral (0 km/h)" if use_metric else "Neutral (0 mph)"
+        _t2_wind_options[_neutral_label] = (0, 0)
+        for _mph in range(2, 22, 2):  # 2, 4, ..., 20 (headwinds)
+            if use_metric:
+                _label = f"{round(_mph * 1.60934)} km/h headwind"
+            else:
+                _label = f"{_mph} mph headwind"
+            _t2_wind_options[_label] = (_mph, 0)
+        _t2_wind_default = _neutral_label
         _t2_wind_sel_early = st.session_state.get("tab2_wind", _t2_wind_default)
         _t2_wind_mph_early, _t2_wind_angle_early = _t2_wind_options.get(
             _t2_wind_sel_early, (0, 0)
@@ -3407,26 +3407,12 @@ def main():
                 key="tab2_power",
             )
 
-            if use_metric:
-                wind_options = {
-                    "16 km/h tailwind": (10, 180),
-                    "8 km/h tailwind": (5, 180),
-                    "Neutral (0 km/h)": (0, 0),
-                    "8 km/h headwind": (5, 0),
-                    "16 km/h headwind": (10, 0),
-                    "24 km/h headwind": (15, 0),
-                }
-                default_wind = "Neutral (0 km/h)"
-            else:
-                wind_options = {
-                    "10 mph tailwind": (10, 180),
-                    "5 mph tailwind": (5, 180),
-                    "Neutral (0 mph)": (0, 0),
-                    "5 mph headwind": (5, 0),
-                    "10 mph headwind": (10, 0),
-                    "15 mph headwind": (15, 0),
-                }
-                default_wind = "Neutral (0 mph)"
+            # Reuse the wind_options dict built earlier at the top of this
+            # page. Keeping both places in sync was error-prone; now the
+            # slider below is driven by the same dict the pre-simulation
+            # calculations used.
+            wind_options = _t2_wind_options
+            default_wind = _t2_wind_default
 
             wind_selection = st.select_slider(
                 "💨 Wind Condition",
