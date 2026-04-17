@@ -189,11 +189,11 @@ def login_ui(sb: Client):
         return _wrap_user(st.session_state["_supabase_user"])
 
     # ── Google sign-in button ──
-    if "_pkce_auth_url" not in st.session_state:
-        auth_url = _build_google_auth_url()
-        st.session_state["_pkce_auth_url"] = auth_url
-    else:
-        auth_url = st.session_state["_pkce_auth_url"]
+    # Always generate a fresh auth URL. Caching this in session_state caused
+    # 403s when the page rerendered: Streamlit reuses the cached URL (same
+    # code_challenge) for the whole session, but Supabase only allows each
+    # challenge to be redeemed once. Stale cached URLs → 403.
+    auth_url = _build_google_auth_url()
 
     st.markdown(
         f'<a href="{auth_url}" target="_self" style="'
