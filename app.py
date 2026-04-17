@@ -48,6 +48,17 @@ st.markdown(
     .stExpander summary span { font-size: 0.82rem !important; }
     .stButton > button { width: 100% !important; }
     .stCaption, .stMarkdown, label { font-size: 0.78rem !important; }
+    /* Shrink st.metric text on narrow screens (mobile). Targets Streamlit's
+       metric value (big number) and label (small caption) globally via class
+       names rather than data-testids — safer across Streamlit versions. */
+    .stMetric [class*="MetricValue"],
+    .stMetric div[data-testid="stMetricValue"] {
+        font-size: 1.1rem !important;
+    }
+    .stMetric [class*="MetricLabel"],
+    .stMetric div[data-testid="stMetricLabel"] {
+        font-size: 0.72rem !important;
+    }
 }
 @media only screen and (max-width: 380px) {
     .stMarkdown, .stCaption { font-size: 0.73rem !important; }
