@@ -1555,10 +1555,19 @@ def main():
         st.error("No segments with location data found in database.")
         return
 
-    # Build dropdown options: "Region Name (N segments)" -> region key or None
-    # Seattle first as default
+    # Build dropdown options: "Region Name (N segments)" -> region key or None.
+    # The REGIONS dict is kept in insertion order (newest-added at bottom) for
+    # ease of maintenance, but the dropdown is sorted alphabetically by city
+    # name so users can find regions predictably. Regions with zero segments
+    # are hidden so the dropdown only shows places that actually have data.
     region_options = {}
-    for name, count in region_counts.items():
+    sorted_regions = sorted(
+        region_counts.items(),
+        key=lambda kv: kv[0].split(",")[0].strip().lower(),
+    )
+    for name, count in sorted_regions:
+        if count == 0:
+            continue
         label = f"{name} ({count} segments)"
         region_options[label] = name
     region_options["All Locations"] = None
@@ -1732,6 +1741,28 @@ def main():
             if auto_label:
                 st.session_state["_region_select"] = auto_label
 
+        # Seed the dropdown default once, only if no selection exists yet.
+        # Priority:
+        #   1. Signed-in user's saved preferred_region (if it's still a valid region)
+        #   2. Seattle for unsigned-in users on first load
+        # We run this AFTER the _auto_region block above so a geocoded match
+        # wins over these defaults, and we never clobber a user's later choice
+        # because we only seed when _region_select is absent from session state.
+        if "_region_select" not in st.session_state:
+            desired_region = None
+            if _is_signed_in:
+                pref = profile.get("preferred_region")
+                if pref and pref in REGIONS:
+                    desired_region = pref
+            else:
+                desired_region = "Seattle, WA"
+
+            if desired_region:
+                for label, rname in region_options.items():
+                    if rname == desired_region:
+                        st.session_state["_region_select"] = label
+                        break
+
         # Region dropdown
         region_labels = list(region_options.keys())
         selected_label = st.selectbox(
@@ -1765,8 +1796,10 @@ def main():
 
     # Initialize use_metric early — the UI checkbox is rendered later
     # in the Units expander, but other expanders need the value now.
+    # Hydrate from the signed-in user's saved profile on first load so
+    # their preference sticks across sessions.
     if "use_metric_cb" not in st.session_state:
-        st.session_state["use_metric_cb"] = False
+        st.session_state["use_metric_cb"] = bool(pval("use_metric", False))
     use_metric = st.session_state["use_metric_cb"]
 
     with st.sidebar.expander("💪 Power Curve", expanded=True):
@@ -1854,9 +1887,9 @@ def main():
     min_athletes = 10  # minimal floor
 
     with st.sidebar.expander("📏 Units", expanded=True):
-        use_metric = st.checkbox(
-            "Use Metric (km, km/h, °C)", value=False, key="use_metric_cb"
-        )
+        # Value is driven by session state (key="use_metric_cb") which is
+        # seeded earlier from the signed-in user's saved profile.
+        use_metric = st.checkbox("Use Metric (km, km/h, °C)", key="use_metric_cb")
         if use_metric:
             st.caption("🌍 Metric units enabled")
         else:
