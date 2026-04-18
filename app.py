@@ -94,9 +94,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Block 3: Sidebar arrow visibility + mobile keyboard suppression on
-# selectboxes. Injected via components.html because it needs attribute
-# selectors and a MutationObserver that st.markdown can't handle.
+# Block 3: Sidebar arrow visibility (injected via components.html because
+# it needs attribute selectors that st.markdown can't handle)
 _components.html(
     """
 <style>
@@ -114,10 +113,6 @@ _components.html(
         width: 22px !important;
         height: 22px !important;
         stroke: rgba(250, 250, 250, 0.9) !important;
-    }
-    /* Selectbox on mobile: hide the text caret so it doesn't look editable */
-    [data-baseweb="select"] input {
-        caret-color: transparent !important;
     }
 }
 </style>
@@ -138,46 +133,6 @@ _components.html(
             m.content = 'width=device-width, initial-scale=1.0';
             window.parent.document.head.appendChild(m);
         }
-    } catch(e) {}
-
-    // Mobile keyboard suppression for st.selectbox.
-    //
-    // Streamlit's selectbox wraps a BaseWeb combobox whose input is a real
-    // <input> element, so mobile browsers pop the on-screen keyboard even
-    // though we don't need search on short lists. Setting readonly + a
-    // non-text inputmode is the only combination that reliably tells iOS
-    // and Android "don't open a keyboard", while still letting the dropdown
-    // open on tap and Streamlit's value-selection logic work.
-    //
-    // We only apply this on narrow viewports so desktop users keep the
-    // type-to-filter behavior. A MutationObserver reapplies after every
-    // Streamlit rerun, since selectboxes get re-created on each interaction.
-    try {
-        var doc = window.parent.document;
-        var isMobile = window.parent.matchMedia("(max-width: 480px)").matches;
-        if (!isMobile) return;
-
-        function suppressKeyboard(root) {
-            var inputs = root.querySelectorAll('[data-baseweb="select"] input');
-            for (var i = 0; i < inputs.length; i++) {
-                var el = inputs[i];
-                if (el.dataset._kbSuppressed === "1") continue;
-                el.setAttribute("readonly", "readonly");
-                el.setAttribute("inputmode", "none");
-                // If iOS has already focused the input, blur it immediately
-                // so the keyboard dismisses on this rerun.
-                el.addEventListener("focus", function(e) {
-                    e.target.blur();
-                });
-                el.dataset._kbSuppressed = "1";
-            }
-        }
-
-        suppressKeyboard(doc);
-        var obs = new MutationObserver(function(muts) {
-            suppressKeyboard(doc);
-        });
-        obs.observe(doc.body, { childList: true, subtree: true });
     } catch(e) {}
 })();
 </script>
