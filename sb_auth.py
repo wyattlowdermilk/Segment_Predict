@@ -197,55 +197,80 @@ def login_ui(sb: Client):
     # cancelled or failed sign-in.
     auth_url = _build_google_auth_url()
 
-    # Render a Google-branded sign-in button using components.v1.html.
-    # Inside that iframe we have full control over HTML/CSS/JS, and JS can
-    # navigate the top browser window via window.top.location.href — the same
-    # mechanism st.link_button uses internally, which we confirmed Google
-    # accepts. A plain <a> in st.markdown fails because Streamlit's HTML
-    # sanitization strips certain attributes that matter for navigation.
-    _js_safe_url = auth_url.replace("'", "\\'").replace('"', "&quot;")
-    import streamlit.components.v1 as _components
-
-    _components.html(
-        f"""
+    # Inject CSS that styles the Google sign-in link_button to match Google's
+    # official dark-button branding. Multiple selectors provide robustness
+    # against Streamlit DOM changes: st-key-* class (Streamlit 1.38+), plus
+    # the legacy href-based and data-testid-based selectors as fallbacks.
+    # All three target the same <a> tag — whichever one matches wins.
+    st.markdown(
+        """
         <style>
-          html, body {{ margin: 0; padding: 0; background: transparent; }}
-          .gsi-btn {{
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 10px;
-            width: 100%;
-            padding: 10px 16px;
-            border-radius: 8px;
-            background: #131314;
-            border: 1px solid #8e918f;
-            color: #ffffff;
-            font-family: 'Roboto', 'Helvetica Neue', Arial, sans-serif;
-            font-weight: 500;
-            font-size: 14px;
-            cursor: pointer;
+        /* Target 1: Streamlit 1.38+ container key class */
+        .st-key-gsi-signin a,
+        /* Target 2: href fragment match (href-stable) */
+        a[href*="/auth/v1/authorize"],
+        /* Target 3: legacy data-testid */
+        div[data-testid="stLinkButton"] a[href*="provider=google"] {
+            background: #131314 !important;
+            color: #ffffff !important;
+            border: 1px solid #8e918f !important;
+            font-family: 'Roboto', 'Helvetica Neue', Arial, sans-serif !important;
+            font-weight: 500 !important;
+            font-size: 14px !important;
+            padding: 10px 16px !important;
+            border-radius: 8px !important;
             transition: background 0.15s, box-shadow 0.15s, border-color 0.15s;
-            box-sizing: border-box;
-          }}
-          .gsi-btn:hover {{
-            background: #2a2a2c;
-            border-color: #ffffff40;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            gap: 10px !important;
+            text-decoration: none !important;
+        }
+        .st-key-gsi-signin a:hover,
+        a[href*="/auth/v1/authorize"]:hover,
+        div[data-testid="stLinkButton"] a[href*="provider=google"]:hover {
+            background: #2a2a2c !important;
+            border-color: #ffffff40 !important;
             box-shadow: 0 1px 2px rgba(0,0,0,0.3),
-                        0 1px 3px 1px rgba(0,0,0,0.15);
-          }}
-          .gsi-btn:active {{ background: #1e1e20; }}
-          .gsi-btn img {{ width: 18px; height: 18px; flex-shrink: 0; }}
+                        0 1px 3px 1px rgba(0,0,0,0.15) !important;
+        }
+        /* Hide Streamlit's default arrow icon inside the link button */
+        .st-key-gsi-signin a svg,
+        a[href*="/auth/v1/authorize"] svg,
+        div[data-testid="stLinkButton"] a[href*="provider=google"] svg {
+            display: none !important;
+        }
+        /* Insert Google G logo via pseudo-element background image */
+        .st-key-gsi-signin a > div::before,
+        a[href*="/auth/v1/authorize"] > div::before,
+        div[data-testid="stLinkButton"] a[href*="provider=google"] > div::before {
+            content: "";
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            margin-right: 2px;
+            background-image: url("https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg");
+            background-size: contain;
+            background-repeat: no-repeat;
+            vertical-align: middle;
+            flex-shrink: 0;
+        }
         </style>
-        <button class="gsi-btn"
-                onclick="window.top.location.href='{_js_safe_url}'">
-          <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
-               alt="">
-          <span>Sign in with Google</span>
-        </button>
         """,
-        height=50,
+        unsafe_allow_html=True,
     )
+
+    # Keyed container so CSS can target this specific link_button. Falls back
+    # gracefully on older Streamlit versions via the href-based selectors above.
+    # st.link_button navigates via <a> inside Streamlit's main iframe (which
+    # has allow-top-navigation-by-user-activation set), giving reliable click
+    # behavior — unlike components.v1.html iframes which have stricter sandbox.
+    with st.container(key="gsi-signin"):
+        st.link_button(
+            "Sign in with Google",
+            auth_url,
+            use_container_width=True,
+        )
 
     # ── Email sign-in ──
     with st.expander("Or sign in with email", expanded=False):
