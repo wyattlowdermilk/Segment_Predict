@@ -1764,11 +1764,54 @@ def main():
                         break
 
         # Region dropdown
+        # Wrap in a keyed container so we can scope CSS/JS that suppresses
+        # the mobile keyboard when this dropdown is tapped. Streamlit's
+        # selectbox opens its options list AND focuses an internal text
+        # input (for filter-as-you-type), which pops up the keyboard on
+        # phones — unnecessary for region selection since users are picking
+        # from a short dropdown.
         region_labels = list(region_options.keys())
-        selected_label = st.selectbox(
-            "Region",
-            region_labels,
-            key="_region_select",
+        with st.container(key="region-dropdown"):
+            selected_label = st.selectbox(
+                "Region",
+                region_labels,
+                key="_region_select",
+            )
+        # Inject once: set inputmode=none on the region selectbox's internal
+        # input so mobile browsers don't show the keyboard. Scoped via the
+        # container's st-key class so other selectboxes keep their filter.
+        st.markdown(
+            """
+            <script>
+            (function() {
+              // Run after Streamlit finishes rendering this container.
+              function suppressKeyboard() {
+                var container = document.querySelector('.st-key-region-dropdown');
+                if (!container) return;
+                var inputs = container.querySelectorAll('input');
+                inputs.forEach(function(inp) {
+                  inp.setAttribute('inputmode', 'none');
+                  inp.setAttribute('readonly', 'readonly');
+                  // Re-apply on focus since Streamlit may re-render it.
+                  inp.addEventListener('focus', function() {
+                    this.setAttribute('inputmode', 'none');
+                    this.setAttribute('readonly', 'readonly');
+                    this.blur();  // briefly blur to dismiss keyboard if it opened
+                    setTimeout(function() {
+                      inp.removeAttribute('readonly');  // allow dropdown interactions
+                    }, 100);
+                  });
+                });
+              }
+              // Try now and a few times after (Streamlit re-renders async).
+              suppressKeyboard();
+              setTimeout(suppressKeyboard, 200);
+              setTimeout(suppressKeyboard, 600);
+              setTimeout(suppressKeyboard, 1200);
+            })();
+            </script>
+            """,
+            unsafe_allow_html=True,
         )
         selected_region = region_options[selected_label]
 
