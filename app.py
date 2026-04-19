@@ -1764,12 +1764,15 @@ def main():
                         break
 
         # Region dropdown
-        # Wrap in a keyed container so we can scope CSS/JS that suppresses
-        # the mobile keyboard when this dropdown is tapped. Streamlit's
-        # selectbox opens its options list AND focuses an internal text
-        # input (for filter-as-you-type), which pops up the keyboard on
-        # phones — unnecessary for region selection since users are picking
-        # from a short dropdown.
+        # Streamlit's selectbox has an internal text input used for
+        # filter-as-you-type. On mobile this triggers the virtual keyboard,
+        # which is unwanted for a region picker. We scope CSS to this
+        # specific dropdown via a keyed container and try to prevent the
+        # keyboard via caret-color + pointer-events tricks.
+        # NOTE: Streamlit strips <script> tags from st.markdown output, so
+        # attribute-modification via JS is not viable here. The options are
+        # (1) these CSS-only tricks, or (2) replacing the selectbox with a
+        # different widget. We keep the selectbox for now.
         region_labels = list(region_options.keys())
         with st.container(key="region-dropdown"):
             selected_label = st.selectbox(
@@ -1777,39 +1780,22 @@ def main():
                 region_labels,
                 key="_region_select",
             )
-        # Inject once: set inputmode=none on the region selectbox's internal
-        # input so mobile browsers don't show the keyboard. Scoped via the
-        # container's st-key class so other selectboxes keep their filter.
         st.markdown(
             """
-            <script>
-            (function() {
-              // Run after Streamlit finishes rendering this container.
-              function suppressKeyboard() {
-                var container = document.querySelector('.st-key-region-dropdown');
-                if (!container) return;
-                var inputs = container.querySelectorAll('input');
-                inputs.forEach(function(inp) {
-                  inp.setAttribute('inputmode', 'none');
-                  inp.setAttribute('readonly', 'readonly');
-                  // Re-apply on focus since Streamlit may re-render it.
-                  inp.addEventListener('focus', function() {
-                    this.setAttribute('inputmode', 'none');
-                    this.setAttribute('readonly', 'readonly');
-                    this.blur();  // briefly blur to dismiss keyboard if it opened
-                    setTimeout(function() {
-                      inp.removeAttribute('readonly');  // allow dropdown interactions
-                    }, 100);
-                  });
-                });
+            <style>
+            @media only screen and (max-width: 768px) {
+              /* Disable caret so input doesn't visually invite typing */
+              .st-key-region-dropdown input {
+                caret-color: transparent !important;
               }
-              // Try now and a few times after (Streamlit re-renders async).
-              suppressKeyboard();
-              setTimeout(suppressKeyboard, 200);
-              setTimeout(suppressKeyboard, 600);
-              setTimeout(suppressKeyboard, 1200);
-            })();
-            </script>
+              /* Prevent pointer events on the input itself — clicks pass
+                 through to the parent combobox, which opens the dropdown
+                 without focusing the input (no focus = no keyboard). */
+              .st-key-region-dropdown [data-baseweb="select"] input {
+                pointer-events: none !important;
+              }
+            }
+            </style>
             """,
             unsafe_allow_html=True,
         )
