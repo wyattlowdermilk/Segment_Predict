@@ -48,9 +48,69 @@ def _rest_url() -> str:
     return st.secrets["supabase"]["url"] + "/rest/v1"
 
 
-# ─── PKCE helpers with file persistence ──────────────────────────────
+# ─── PKCE helpers with cookie-backed persistence ─────────────────────
+#
+# The PKCE flow requires the code_verifier to survive the round-trip to
+# Google/Supabase and back. On Streamlit Cloud, `/tmp` files and
+# `st.session_state` both die when the container restarts (deploys, scale
+# events, idle cycling), which causes "bad_code_verifier" or
+# "No code verifier found" errors during the OAuth callback.
+#
+# Cookies live in the browser so they survive any server-side cycling.
+# The cookie is encrypted with streamlit-cookies-manager's EncryptedCookieManager
+# so even on a shared streamlit.app subdomain nobody else can read your
+# verifier. The cookie is also given an expiry so stale verifiers don't
+# accumulate if a user abandons a sign-in flow.
+#
+# Fallbacks: if streamlit-cookies-manager fails to import or the cookie
+# manager isn't ready, we fall back to st.session_state + /tmp file.
 
 _VERIFIER_FILE = os.path.join(tempfile.gettempdir(), "segment_app_pkce_verifier.json")
+_VERIFIER_COOKIE_NAME = "pkce_verifier"
+_VERIFIER_TIMESTAMP_COOKIE = "pkce_verifier_at"
+_VERIFIER_MAX_AGE_SECONDS = 600  # 10 min — slightly > Supabase flow_state TTL
+
+
+def _get_cookie_manager():
+    """Return an initialized EncryptedCookieManager, or None if unavailable.
+
+    Caches the manager in session_state. Requires `streamlit-cookies-manager`
+    to be installed and a `COOKIES_PASSWORD` secret configured.
+    """
+    if "_cookie_mgr" in st.session_state:
+        return st.session_state["_cookie_mgr"]
+    try:
+        from streamlit_cookies_manager import EncryptedCookieManager
+
+        # Password from secrets.toml; we require it rather than using a hardcoded
+        # default to ensure cookies can't be decrypted by anyone else who deploys
+        # a similarly-named app on streamlit.app.
+        password = st.secrets.get("cookies", {}).get("password", "")
+        if not password:
+            # Fall back to a derived password from the supabase URL so cookies
+            # still work, even if user hasn't configured `[cookies]` section.
+            # NOT as secure as a proper secret but better than nothing.
+            password = hashlib.sha256(
+                st.secrets["supabase"]["url"].encode()
+            ).hexdigest()
+        mgr = EncryptedCookieManager(
+            prefix="segment_predict/",
+            password=password,
+        )
+        if not mgr.ready():
+            # Cookie component needs one render cycle to boot up. Signal
+            # the caller to handle this (typically by just falling through
+            # to file-based storage on this render).
+            st.session_state["_cookie_mgr"] = mgr
+            return None
+        st.session_state["_cookie_mgr"] = mgr
+        return mgr
+    except Exception as e:
+        # Package not installed, or failed to init. Fall through to file.
+        import logging
+
+        logging.warning(f"[PKCE] Cookie manager unavailable: {e}")
+        return None
 
 
 def _generate_pkce_pair():
@@ -61,32 +121,88 @@ def _generate_pkce_pair():
 
 
 def _save_verifier(verifier: str):
+    """Save verifier to session_state, cookie (preferred), and /tmp (fallback)."""
+    import time
+
     st.session_state["_pkce_verifier"] = verifier
+    st.session_state["_pkce_verifier_at"] = time.time()
+    # Preferred: cookie
+    mgr = _get_cookie_manager()
+    if mgr is not None:
+        try:
+            mgr[_VERIFIER_COOKIE_NAME] = verifier
+            mgr[_VERIFIER_TIMESTAMP_COOKIE] = str(int(time.time()))
+            mgr.save()
+        except Exception as e:
+            import logging
+
+            logging.warning(f"[PKCE] Failed to save to cookie: {e}")
+    # Fallback: /tmp file (for local dev primarily)
     try:
         with open(_VERIFIER_FILE, "w") as f:
-            json.dump({"verifier": verifier}, f)
+            json.dump({"verifier": verifier, "at": time.time()}, f)
     except Exception:
         pass
 
 
 def _load_verifier() -> str:
+    """Load verifier from the freshest source available. Discards stale entries."""
+    import time
+
+    now = time.time()
+    # 1. Session state (fastest path, no I/O)
     v = st.session_state.get("_pkce_verifier")
-    if v:
+    v_at = st.session_state.get("_pkce_verifier_at", 0)
+    if v and (now - v_at) < _VERIFIER_MAX_AGE_SECONDS:
         return v
+    # 2. Cookie (survives container restarts)
+    mgr = _get_cookie_manager()
+    if mgr is not None:
+        try:
+            v = mgr.get(_VERIFIER_COOKIE_NAME)
+            v_at_str = mgr.get(_VERIFIER_TIMESTAMP_COOKIE, "0")
+            try:
+                v_at = int(v_at_str) if v_at_str else 0
+            except (TypeError, ValueError):
+                v_at = 0
+            if v and (now - v_at) < _VERIFIER_MAX_AGE_SECONDS:
+                st.session_state["_pkce_verifier"] = v
+                st.session_state["_pkce_verifier_at"] = v_at
+                return v
+        except Exception as e:
+            import logging
+
+            logging.warning(f"[PKCE] Failed to read from cookie: {e}")
+    # 3. /tmp file fallback (local dev mostly)
     try:
         with open(_VERIFIER_FILE, "r") as f:
             data = json.load(f)
             v = data.get("verifier", "")
-            if v:
+            v_at = data.get("at", 0)
+            if v and (now - v_at) < _VERIFIER_MAX_AGE_SECONDS:
                 st.session_state["_pkce_verifier"] = v
-            return v
+                st.session_state["_pkce_verifier_at"] = v_at
+                return v
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 def _clear_verifier():
+    """Wipe verifier from all storage layers."""
     st.session_state.pop("_pkce_verifier", None)
+    st.session_state.pop("_pkce_verifier_at", None)
     st.session_state.pop("_pkce_auth_url", None)
+    mgr = _get_cookie_manager()
+    if mgr is not None:
+        try:
+            if _VERIFIER_COOKIE_NAME in mgr:
+                del mgr[_VERIFIER_COOKIE_NAME]
+            if _VERIFIER_TIMESTAMP_COOKIE in mgr:
+                del mgr[_VERIFIER_TIMESTAMP_COOKIE]
+            mgr.save()
+        except Exception:
+            pass
     try:
         os.remove(_VERIFIER_FILE)
     except Exception:

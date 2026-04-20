@@ -7,3 +7,4 @@ matplotlib
 altair
 beautifulsoup4
 supabase
+streamlit-cookies-manager
