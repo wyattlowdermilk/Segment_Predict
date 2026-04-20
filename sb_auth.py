@@ -107,9 +107,17 @@ def _build_google_auth_url():
         # Re-derive the challenge from the verifier (deterministic SHA-256).
         digest = hashlib.sha256(verifier.encode("ascii")).digest()
         challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+        print(
+            f"[PKCE] AuthURL (reuse): verifier prefix={verifier[:8]}..., "
+            f"challenge={challenge[:16]}..."
+        )
     else:
         verifier, challenge = _generate_pkce_pair()
         _save_verifier(verifier)
+        print(
+            f"[PKCE] AuthURL (new): verifier prefix={verifier[:8]}..., "
+            f"challenge={challenge[:16]}..."
+        )
     redirect_url = _get_redirect_url()
     params = {
         "provider": "google",
@@ -150,6 +158,16 @@ def _exchange_code(code: str) -> dict:
     verifier = _load_verifier()
     if not verifier:
         raise Exception("No code verifier found")
+    # Diagnostic: log the challenge derived from our verifier so we can
+    # compare against what was sent in the authorize URL.
+    import hashlib as _h, base64 as _b
+
+    _digest = _h.sha256(verifier.encode("ascii")).digest()
+    _challenge = _b.urlsafe_b64encode(_digest).rstrip(b"=").decode("ascii")
+    print(
+        f"[PKCE] Exchange: verifier prefix={verifier[:8]}..., "
+        f"challenge={_challenge[:16]}..., code prefix={code[:8]}..."
+    )
     resp = requests.post(
         f"{url}/auth/v1/token?grant_type=pkce",
         json={"auth_code": code, "code_verifier": verifier},
