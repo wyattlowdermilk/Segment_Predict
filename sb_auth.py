@@ -102,19 +102,21 @@ def _build_google_auth_url():
     #   "code challenge does not match previously saved code verifier"
     # Keeping the verifier stable across renders avoids that.
     existing = _load_verifier()
+    import logging as _l_auth
+
     if existing:
         verifier = existing
         # Re-derive the challenge from the verifier (deterministic SHA-256).
         digest = hashlib.sha256(verifier.encode("ascii")).digest()
         challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-        print(
+        _l_auth.warning(
             f"[PKCE] AuthURL (reuse): verifier prefix={verifier[:8]}..., "
             f"challenge={challenge[:16]}..."
         )
     else:
         verifier, challenge = _generate_pkce_pair()
         _save_verifier(verifier)
-        print(
+        _l_auth.warning(
             f"[PKCE] AuthURL (new): verifier prefix={verifier[:8]}..., "
             f"challenge={challenge[:16]}..."
         )
@@ -159,12 +161,14 @@ def _exchange_code(code: str) -> dict:
     if not verifier:
         raise Exception("No code verifier found")
     # Diagnostic: log the challenge derived from our verifier so we can
-    # compare against what was sent in the authorize URL.
-    import hashlib as _h, base64 as _b
+    # compare against what was sent in the authorize URL. Use logging.warning
+    # so output appears in Streamlit Cloud's stderr-based log stream (print()
+    # to stdout may be filtered by the platform).
+    import hashlib as _h, base64 as _b, logging as _l
 
     _digest = _h.sha256(verifier.encode("ascii")).digest()
     _challenge = _b.urlsafe_b64encode(_digest).rstrip(b"=").decode("ascii")
-    print(
+    _l.warning(
         f"[PKCE] Exchange: verifier prefix={verifier[:8]}..., "
         f"challenge={_challenge[:16]}..., code prefix={code[:8]}..."
     )
