@@ -874,23 +874,9 @@ def find_tailwind_segments(
 # =======================
 # Region definitions
 # =======================
-# To add a new region, just append an entry here.
-# Every segment in the DB is assigned to whichever region center is closest.
-REGIONS = {
-    "Seattle, WA": {"lat": 47.6062, "lon": -122.3321, "min_athletes": 1500},
-    "Orcas Island, WA": {"lat": 48.6543, "lon": -122.9060, "min_athletes": 100},
-    "Boulder, CO": {"lat": 40.0150, "lon": -105.2705, "min_athletes": 1500},
-    "Salt Lake City, UT": {"lat": 40.7608, "lon": -111.8910, "min_athletes": 500},
-    "Cottonwood Heights, UT": {"lat": 40.6197, "lon": -111.8103, "min_athletes": 500},
-    "Weddington, NC": {"lat": 34.9901, "lon": -80.7812, "min_athletes": 200},
-    "Portland, OR": {"lat": 45.5152, "lon": -122.6784, "min_athletes": 1500},
-    "Coraopolis, PA": {"lat": 40.4978, "lon": -80.1156, "min_athletes": 200},
-    "Pittsburgh, PA": {"lat": 40.4406, "lon": -79.9959, "min_athletes": 500},
-    "Cary, NC": {"lat": 35.7915, "lon": -78.7811, "min_athletes": 300},
-    "Oakland, CA": {"lat": 37.8044, "lon": -122.2712, "min_athletes": 1500},
-    "Cincinnati, OH": {"lat": 39.1031, "lon": -84.5120, "min_athletes": 300},
-    "Blacksburg, VA": {"lat": 37.2296, "lon": -80.4139, "min_athletes": 100},
-}
+# Source of truth: regions.py (shared with Segment_Pull.py).
+# To add a new region, edit regions.py — both files pick it up automatically.
+from regions import REGIONS
 
 
 def _haversine(lat1, lon1, lat2, lon2):
