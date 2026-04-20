@@ -72,10 +72,13 @@ _VERIFIER_MAX_AGE_SECONDS = 600  # 10 min — slightly > Supabase flow_state TTL
 
 
 def _get_cookie_manager():
-    """Return an initialized EncryptedCookieManager, or None if unavailable.
+    """Return the EncryptedCookieManager (possibly not ready yet), or None.
 
-    Caches the manager in session_state. Requires `streamlit-cookies-manager`
-    to be installed and a `COOKIES_PASSWORD` secret configured.
+    Returns None only if the package isn't installed or instantiation fails.
+    Callers must check mgr.ready() before using .get()/.save() — operations
+    on a not-ready manager will fail silently or raise.
+
+    Caches the manager in session_state so the component renders once.
     """
     if "_cookie_mgr" in st.session_state:
         return st.session_state["_cookie_mgr"]
@@ -97,12 +100,6 @@ def _get_cookie_manager():
             prefix="segment_predict/",
             password=password,
         )
-        if not mgr.ready():
-            # Cookie component needs one render cycle to boot up. Signal
-            # the caller to handle this (typically by just falling through
-            # to file-based storage on this render).
-            st.session_state["_cookie_mgr"] = mgr
-            return None
         st.session_state["_cookie_mgr"] = mgr
         return mgr
     except Exception as e:
@@ -349,6 +346,40 @@ def login_ui(sb: Client):
     url = st.secrets["supabase"]["url"]
     key = st.secrets["supabase"]["key"]
 
+    # Fast path: already signed in — skip cookie init entirely to avoid
+    # latency on every page render.
+    if "_supabase_user" in st.session_state:
+        return _wrap_user(st.session_state["_supabase_user"])
+
+    # ── Cookie-manager boot ──
+    # The cookie component needs to render at least once before mgr.ready()
+    # returns True. We force that here so verifier storage works before either
+    # the OAuth callback (?code=...) or the Sign in button path runs.
+    # Only applied to signed-out users to avoid adding latency for
+    # already-signed-in sessions.
+    #
+    # Safety: if the component never becomes ready after 3 attempts, give up
+    # and let the app fall through to the non-cookie fallback paths.
+    mgr = _get_cookie_manager()
+    if mgr is not None and not mgr.ready():
+        _attempt = st.session_state.get("_cookie_boot_attempts", 0) + 1
+        st.session_state["_cookie_boot_attempts"] = _attempt
+        if _attempt <= 3:
+            # First few renders: halt so the component can boot. Streamlit
+            # auto-reruns when the component delivers cookies.
+            st.stop()
+        # Else: fall through without cookies — log so we can see this.
+        import logging as _l
+
+        _l.warning(
+            f"[PKCE] Cookie manager never became ready after {_attempt} "
+            f"attempts; proceeding without cookie storage"
+        )
+    elif mgr is not None and mgr.ready():
+        # Reset attempt counter once cookies work so a future sign-out/sign-in
+        # cycle gets the full 3 attempts if needed.
+        st.session_state["_cookie_boot_attempts"] = 0
+
     # ── Handle OAuth callback ──
     if "code" in st.query_params:
         code = st.query_params["code"]
@@ -367,10 +398,6 @@ def login_ui(sb: Client):
             st.sidebar.error(f"Sign-in failed: {e}")
             _clear_verifier()
         return None
-
-    # ── Already signed in? ──
-    if "_supabase_user" in st.session_state:
-        return _wrap_user(st.session_state["_supabase_user"])
 
     # ── Google sign-in button ──
     # Reuse the existing verifier/URL across renders (see _build_google_auth_url
