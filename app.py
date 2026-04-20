@@ -2219,11 +2219,17 @@ def main():
                 )
                 seg_bearings.append(bearing)
 
-        # Build weather + wind opportunity data for all 8 days
+        # On mobile, show a 5-day forecast (last 3 days of the 8-day forecast
+        # aren't as actionable and make the sidebar-column table long).
+        # Desktop keeps the full 8-day view. This cap also constrains the
+        # "Show segments for" day selector below.
+        _forecast_days = 5 if IS_MOBILE else 8
+
+        # Build weather + wind opportunity data
         weather_rows = []
         day_labels = []
         day_forecasts = {}
-        for day_offset in range(8):
+        for day_offset in range(_forecast_days):
             target_date = datetime.now() + timedelta(days=day_offset)
             afternoon_time = target_date.replace(
                 hour=14, minute=0, second=0, microsecond=0
@@ -2292,9 +2298,9 @@ def main():
 
         with col_weather:
             if IS_MOBILE:
-                st.markdown(f"##### 8-Day Forecast — {location_name}")
+                st.markdown(f"##### {_forecast_days}-Day Forecast — {location_name}")
             else:
-                st.markdown("##### 8-Day Forecast")
+                st.markdown(f"##### {_forecast_days}-Day Forecast")
 
             # Build HTML weather table for better styling
             table_html = '<table class="weather-tbl" style="width:100%; border-collapse:collapse; font-size:1.05em;">'
@@ -2393,9 +2399,7 @@ def main():
                 help="Only show segments ridden by at least this many unique athletes",
             )
 
-            # Entrance Speed — always visible, not a dropdown
-            st.markdown("")
-            st.markdown("##### Entrance Speed")
+            # Entrance Speed — included in Segment Filters, no separate header
             if use_metric:
                 _es_kmh = st.slider(
                     "Segment Entry Speed (km/h)",
