@@ -500,6 +500,73 @@ def toggle_favorite(sb: Client, user_id: str, segment_id: int) -> bool:
         return False
 
 
+# ─── Per-user exclusions (REST API with user's token) ────────────────
+# Parallel to favorites but for segments the user wants hidden from Tab 1b.
+# Separate from the global `flagged_segments` table (which applies to all
+# users). Backed by the `excluded_segments` Supabase table with columns:
+#   user_id uuid, segment_id bigint, created_at timestamptz
+# Primary key: (user_id, segment_id). RLS: users can only see/modify rows
+# where user_id = auth.uid().
+
+
+@st.cache_data(ttl=60)
+def get_exclusions(_user_id: str, _sb_url: str, _sb_key: str) -> set:
+    """Return the set of segment_ids the given user has excluded."""
+    try:
+        token = st.session_state.get("_supabase_access_token", "")
+        headers = {
+            "apikey": _sb_key,
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}" if token else f"Bearer {_sb_key}",
+        }
+        resp = requests.get(
+            f"{_sb_url}/rest/v1/excluded_segments?user_id=eq.{_user_id}&select=segment_id",
+            headers=headers,
+        )
+        if resp.status_code == 200:
+            return {row["segment_id"] for row in resp.json()}
+    except Exception:
+        pass
+    return set()
+
+
+def toggle_exclusion(sb: Client, user_id: str, segment_id: int) -> bool:
+    """Add or remove a segment from the user's personal exclusion list.
+
+    Returns True if the segment is now excluded, False if it was un-excluded.
+    """
+    try:
+        headers = _auth_headers()
+
+        # Check if exists
+        resp = requests.get(
+            f"{_rest_url()}/excluded_segments?user_id=eq.{user_id}&segment_id=eq.{segment_id}&select=segment_id",
+            headers=headers,
+        )
+        if resp.status_code == 200 and resp.json():
+            # Remove
+            requests.delete(
+                f"{_rest_url()}/excluded_segments?user_id=eq.{user_id}&segment_id=eq.{segment_id}",
+                headers=headers,
+            )
+            get_exclusions.clear()
+            return False
+        else:
+            # Add
+            resp2 = requests.post(
+                f"{_rest_url()}/excluded_segments",
+                json={"user_id": user_id, "segment_id": segment_id},
+                headers={**headers, "Prefer": "return=minimal"},
+            )
+            if resp2.status_code not in (200, 201):
+                st.warning(f"Could not add exclusion: {resp2.status_code} {resp2.text}")
+            get_exclusions.clear()
+            return True
+    except Exception as e:
+        st.warning(f"Could not update exclusion: {e}")
+        return False
+
+
 # ─── Visit tracking ───────────────────────────────────────────────────
 
 
