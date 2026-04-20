@@ -177,6 +177,10 @@ def _exchange_code(code: str) -> dict:
         json={"auth_code": code, "code_verifier": verifier},
         headers={"apikey": key, "Content-Type": "application/json"},
     )
+    _l.warning(
+        f"[PKCE] Exchange response: status={resp.status_code}, "
+        f"body_prefix={resp.text[:120] if resp.text else '(empty)'}"
+    )
     if resp.status_code == 200:
         return resp.json()
     raise Exception(f"Token exchange failed ({resp.status_code}): {resp.text}")
