@@ -95,8 +95,21 @@ def _clear_verifier():
 
 def _build_google_auth_url():
     url = st.secrets["supabase"]["url"]
-    verifier, challenge = _generate_pkce_pair()
-    _save_verifier(verifier)
+    # Reuse the existing verifier if we already have one stored. Regenerating
+    # on every render causes a race: Streamlit can re-render login_ui() during
+    # the OAuth round-trip, overwriting the verifier that matches Google's
+    # outstanding code with a new one. Result at callback time:
+    #   "code challenge does not match previously saved code verifier"
+    # Keeping the verifier stable across renders avoids that.
+    existing = _load_verifier()
+    if existing:
+        verifier = existing
+        # Re-derive the challenge from the verifier (deterministic SHA-256).
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    else:
+        verifier, challenge = _generate_pkce_pair()
+        _save_verifier(verifier)
     redirect_url = _get_redirect_url()
     params = {
         "provider": "google",
@@ -192,9 +205,10 @@ def login_ui(sb: Client):
         return _wrap_user(st.session_state["_supabase_user"])
 
     # ── Google sign-in button ──
-    # Always generate a fresh auth URL. PKCE challenges can only be redeemed
-    # once, so caching the URL in session_state would break retry after a
-    # cancelled or failed sign-in.
+    # Reuse the existing verifier/URL across renders (see _build_google_auth_url
+    # comment). On success, _clear_verifier() below wipes the verifier so the
+    # next sign-in starts fresh; on exchange failure, the verifier is also
+    # cleared so a retry regenerates.
     auth_url = _build_google_auth_url()
 
     # Inject CSS that styles the Google sign-in link_button to match Google's
