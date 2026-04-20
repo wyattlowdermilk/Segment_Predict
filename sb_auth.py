@@ -130,13 +130,23 @@ def _save_verifier(verifier: str):
     mgr = _get_cookie_manager()
     if mgr is not None:
         try:
-            mgr[_VERIFIER_COOKIE_NAME] = verifier
-            mgr[_VERIFIER_TIMESTAMP_COOKIE] = str(int(time.time()))
-            mgr.save()
+            if not mgr.ready():
+                import logging
+
+                logging.warning("[PKCE] Cookie save skipped: manager not ready")
+            else:
+                mgr[_VERIFIER_COOKIE_NAME] = verifier
+                mgr[_VERIFIER_TIMESTAMP_COOKIE] = str(int(time.time()))
+                mgr.save()
+                import logging
+
+                logging.warning(f"[PKCE] Cookie saved: verifier={verifier[:8]}...")
         except Exception as e:
             import logging
 
-            logging.warning(f"[PKCE] Failed to save to cookie: {e}")
+            logging.warning(
+                f"[PKCE] Failed to save to cookie: {type(e).__name__}: {e!r}"
+            )
     # Fallback: /tmp file (for local dev primarily)
     try:
         with open(_VERIFIER_FILE, "w") as f:
@@ -159,20 +169,36 @@ def _load_verifier() -> str:
     mgr = _get_cookie_manager()
     if mgr is not None:
         try:
-            v = mgr.get(_VERIFIER_COOKIE_NAME)
-            v_at_str = mgr.get(_VERIFIER_TIMESTAMP_COOKIE, "0")
-            try:
-                v_at = int(v_at_str) if v_at_str else 0
-            except (TypeError, ValueError):
-                v_at = 0
-            if v and (now - v_at) < _VERIFIER_MAX_AGE_SECONDS:
-                st.session_state["_pkce_verifier"] = v
-                st.session_state["_pkce_verifier_at"] = v_at
-                return v
+            if not mgr.ready():
+                import logging
+
+                logging.warning("[PKCE] Cookie read skipped: manager not ready")
+            else:
+                v = mgr.get(_VERIFIER_COOKIE_NAME)
+                v_at_str = mgr.get(_VERIFIER_TIMESTAMP_COOKIE, "0")
+                try:
+                    v_at = int(v_at_str) if v_at_str else 0
+                except (TypeError, ValueError):
+                    v_at = 0
+                if v and (now - v_at) < _VERIFIER_MAX_AGE_SECONDS:
+                    st.session_state["_pkce_verifier"] = v
+                    st.session_state["_pkce_verifier_at"] = v_at
+                    import logging
+
+                    logging.warning(f"[PKCE] Cookie loaded: verifier={v[:8]}...")
+                    return v
+                elif v:
+                    import logging
+
+                    logging.warning(
+                        f"[PKCE] Cookie verifier expired: age={now - v_at:.0f}s"
+                    )
         except Exception as e:
             import logging
 
-            logging.warning(f"[PKCE] Failed to read from cookie: {e}")
+            logging.warning(
+                f"[PKCE] Failed to read from cookie: {type(e).__name__}: {e!r}"
+            )
     # 3. /tmp file fallback (local dev mostly)
     try:
         with open(_VERIFIER_FILE, "r") as f:
