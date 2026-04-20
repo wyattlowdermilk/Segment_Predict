@@ -351,34 +351,14 @@ def login_ui(sb: Client):
     if "_supabase_user" in st.session_state:
         return _wrap_user(st.session_state["_supabase_user"])
 
-    # ── Cookie-manager boot ──
-    # The cookie component needs to render at least once before mgr.ready()
-    # returns True. We force that here so verifier storage works before either
-    # the OAuth callback (?code=...) or the Sign in button path runs.
-    # Only applied to signed-out users to avoid adding latency for
-    # already-signed-in sessions.
-    #
-    # Safety: if the component never becomes ready after 3 attempts, give up
-    # and let the app fall through to the non-cookie fallback paths.
-    mgr = _get_cookie_manager()
-    if mgr is not None and not mgr.ready():
-        _attempt = st.session_state.get("_cookie_boot_attempts", 0) + 1
-        st.session_state["_cookie_boot_attempts"] = _attempt
-        if _attempt <= 3:
-            # First few renders: halt so the component can boot. Streamlit
-            # auto-reruns when the component delivers cookies.
-            st.stop()
-        # Else: fall through without cookies — log so we can see this.
-        import logging as _l
-
-        _l.warning(
-            f"[PKCE] Cookie manager never became ready after {_attempt} "
-            f"attempts; proceeding without cookie storage"
-        )
-    elif mgr is not None and mgr.ready():
-        # Reset attempt counter once cookies work so a future sign-out/sign-in
-        # cycle gets the full 3 attempts if needed.
-        st.session_state["_cookie_boot_attempts"] = 0
+    # ── Cookie-manager boot (non-blocking) ──
+    # Create the cookie manager so its component renders and can become
+    # ready on a subsequent render. We do NOT st.stop() while waiting —
+    # that caused the whole page to hang if the component never booted.
+    # Instead, we let the render continue; if the manager isn't ready yet,
+    # _save_verifier/_load_verifier fall back to session_state + /tmp.
+    # On a subsequent render the manager becomes ready and cookies are used.
+    _get_cookie_manager()
 
     # ── Handle OAuth callback ──
     if "code" in st.query_params:
