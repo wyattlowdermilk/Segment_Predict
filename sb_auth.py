@@ -48,66 +48,19 @@ def _rest_url() -> str:
     return st.secrets["supabase"]["url"] + "/rest/v1"
 
 
-# ─── PKCE helpers with cookie-backed persistence ─────────────────────
+# ─── PKCE helpers with session_state + /tmp persistence ──────────────
 #
-# The PKCE flow requires the code_verifier to survive the round-trip to
-# Google/Supabase and back. On Streamlit Cloud, `/tmp` files and
-# `st.session_state` both die when the container restarts (deploys, scale
-# events, idle cycling), which causes "bad_code_verifier" or
-# "No code verifier found" errors during the OAuth callback.
+# Two-tier storage for the OAuth code_verifier:
+#   1. st.session_state (fastest, survives same-session renders)
+#   2. /tmp file (survives reruns within a container)
 #
-# Cookies live in the browser so they survive any server-side cycling.
-# The cookie is encrypted with streamlit-cookies-manager's EncryptedCookieManager
-# so even on a shared streamlit.app subdomain nobody else can read your
-# verifier. The cookie is also given an expiry so stale verifiers don't
-# accumulate if a user abandons a sign-in flow.
-#
-# Fallbacks: if streamlit-cookies-manager fails to import or the cookie
-# manager isn't ready, we fall back to st.session_state + /tmp file.
+# Neither survives container restarts on Streamlit Cloud — users may see
+# occasional "bad_code_verifier" errors after deploys. Retry resolves it.
+# We also expire stored verifiers after 10 minutes to prevent stale-state
+# sign-in failures.
 
 _VERIFIER_FILE = os.path.join(tempfile.gettempdir(), "segment_app_pkce_verifier.json")
-_VERIFIER_COOKIE_NAME = "pkce_verifier"
-_VERIFIER_TIMESTAMP_COOKIE = "pkce_verifier_at"
 _VERIFIER_MAX_AGE_SECONDS = 600  # 10 min — slightly > Supabase flow_state TTL
-
-
-def _get_cookie_manager():
-    """Return the EncryptedCookieManager (possibly not ready yet), or None.
-
-    Returns None only if the package isn't installed or instantiation fails.
-    Callers must check mgr.ready() before using .get()/.save() — operations
-    on a not-ready manager will fail silently or raise.
-
-    Caches the manager in session_state so the component renders once.
-    """
-    if "_cookie_mgr" in st.session_state:
-        return st.session_state["_cookie_mgr"]
-    try:
-        from streamlit_cookies_manager import EncryptedCookieManager
-
-        # Password from secrets.toml; we require it rather than using a hardcoded
-        # default to ensure cookies can't be decrypted by anyone else who deploys
-        # a similarly-named app on streamlit.app.
-        password = st.secrets.get("cookies", {}).get("password", "")
-        if not password:
-            # Fall back to a derived password from the supabase URL so cookies
-            # still work, even if user hasn't configured `[cookies]` section.
-            # NOT as secure as a proper secret but better than nothing.
-            password = hashlib.sha256(
-                st.secrets["supabase"]["url"].encode()
-            ).hexdigest()
-        mgr = EncryptedCookieManager(
-            prefix="segment_predict/",
-            password=password,
-        )
-        st.session_state["_cookie_mgr"] = mgr
-        return mgr
-    except Exception as e:
-        # Package not installed, or failed to init. Fall through to file.
-        import logging
-
-        logging.warning(f"[PKCE] Cookie manager unavailable: {e}")
-        return None
 
 
 def _generate_pkce_pair():
@@ -118,33 +71,11 @@ def _generate_pkce_pair():
 
 
 def _save_verifier(verifier: str):
-    """Save verifier to session_state, cookie (preferred), and /tmp (fallback)."""
+    """Save verifier to session_state and /tmp file."""
     import time
 
     st.session_state["_pkce_verifier"] = verifier
     st.session_state["_pkce_verifier_at"] = time.time()
-    # Preferred: cookie
-    mgr = _get_cookie_manager()
-    if mgr is not None:
-        try:
-            if not mgr.ready():
-                import logging
-
-                logging.warning("[PKCE] Cookie save skipped: manager not ready")
-            else:
-                mgr[_VERIFIER_COOKIE_NAME] = verifier
-                mgr[_VERIFIER_TIMESTAMP_COOKIE] = str(int(time.time()))
-                mgr.save()
-                import logging
-
-                logging.warning(f"[PKCE] Cookie saved: verifier={verifier[:8]}...")
-        except Exception as e:
-            import logging
-
-            logging.warning(
-                f"[PKCE] Failed to save to cookie: {type(e).__name__}: {e!r}"
-            )
-    # Fallback: /tmp file (for local dev primarily)
     try:
         with open(_VERIFIER_FILE, "w") as f:
             json.dump({"verifier": verifier, "at": time.time()}, f)
@@ -153,50 +84,16 @@ def _save_verifier(verifier: str):
 
 
 def _load_verifier() -> str:
-    """Load verifier from the freshest source available. Discards stale entries."""
+    """Load verifier from session_state or /tmp. Discards stale entries."""
     import time
 
     now = time.time()
-    # 1. Session state (fastest path, no I/O)
+    # 1. Session state (fastest path)
     v = st.session_state.get("_pkce_verifier")
     v_at = st.session_state.get("_pkce_verifier_at", 0)
     if v and (now - v_at) < _VERIFIER_MAX_AGE_SECONDS:
         return v
-    # 2. Cookie (survives container restarts)
-    mgr = _get_cookie_manager()
-    if mgr is not None:
-        try:
-            if not mgr.ready():
-                import logging
-
-                logging.warning("[PKCE] Cookie read skipped: manager not ready")
-            else:
-                v = mgr.get(_VERIFIER_COOKIE_NAME)
-                v_at_str = mgr.get(_VERIFIER_TIMESTAMP_COOKIE, "0")
-                try:
-                    v_at = int(v_at_str) if v_at_str else 0
-                except (TypeError, ValueError):
-                    v_at = 0
-                if v and (now - v_at) < _VERIFIER_MAX_AGE_SECONDS:
-                    st.session_state["_pkce_verifier"] = v
-                    st.session_state["_pkce_verifier_at"] = v_at
-                    import logging
-
-                    logging.warning(f"[PKCE] Cookie loaded: verifier={v[:8]}...")
-                    return v
-                elif v:
-                    import logging
-
-                    logging.warning(
-                        f"[PKCE] Cookie verifier expired: age={now - v_at:.0f}s"
-                    )
-        except Exception as e:
-            import logging
-
-            logging.warning(
-                f"[PKCE] Failed to read from cookie: {type(e).__name__}: {e!r}"
-            )
-    # 3. /tmp file fallback (local dev mostly)
+    # 2. /tmp file fallback (survives same-container reruns)
     try:
         with open(_VERIFIER_FILE, "r") as f:
             data = json.load(f)
@@ -212,20 +109,10 @@ def _load_verifier() -> str:
 
 
 def _clear_verifier():
-    """Wipe verifier from all storage layers."""
+    """Wipe verifier from session_state and /tmp."""
     st.session_state.pop("_pkce_verifier", None)
     st.session_state.pop("_pkce_verifier_at", None)
     st.session_state.pop("_pkce_auth_url", None)
-    mgr = _get_cookie_manager()
-    if mgr is not None:
-        try:
-            if _VERIFIER_COOKIE_NAME in mgr:
-                del mgr[_VERIFIER_COOKIE_NAME]
-            if _VERIFIER_TIMESTAMP_COOKIE in mgr:
-                del mgr[_VERIFIER_TIMESTAMP_COOKIE]
-            mgr.save()
-        except Exception:
-            pass
     try:
         os.remove(_VERIFIER_FILE)
     except Exception:
@@ -346,19 +233,9 @@ def login_ui(sb: Client):
     url = st.secrets["supabase"]["url"]
     key = st.secrets["supabase"]["key"]
 
-    # Fast path: already signed in — skip cookie init entirely to avoid
-    # latency on every page render.
+    # Fast path: already signed in — return immediately.
     if "_supabase_user" in st.session_state:
         return _wrap_user(st.session_state["_supabase_user"])
-
-    # ── Cookie-manager boot (non-blocking) ──
-    # Create the cookie manager so its component renders and can become
-    # ready on a subsequent render. We do NOT st.stop() while waiting —
-    # that caused the whole page to hang if the component never booted.
-    # Instead, we let the render continue; if the manager isn't ready yet,
-    # _save_verifier/_load_verifier fall back to session_state + /tmp.
-    # On a subsequent render the manager becomes ready and cookies are used.
-    _get_cookie_manager()
 
     # ── Handle OAuth callback ──
     if "code" in st.query_params:
