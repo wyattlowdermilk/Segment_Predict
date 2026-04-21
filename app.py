@@ -3474,10 +3474,16 @@ def main():
         log_tab_view("simulator", user)
         st.header("Segment Time Simulator")
 
+        # Segment Simulator uses a fixed 40-mile radius around the selected
+        # region — intentionally decoupled from the Daily Planner slider so
+        # searching here doesn't depend on whatever distance the user set
+        # over in tab 1.
+        SIMULATOR_RADIUS_MI = 40
+
         # Load only segments within the selected region/distance
         try:
             segments_list = get_segments_for_region(
-                DB_PATH, selected_region, max_distance
+                DB_PATH, selected_region, SIMULATOR_RADIUS_MI
             )
             if "elevation_gain_m" not in segments_list.columns:
                 st.warning("No segments in database.")
@@ -3489,8 +3495,8 @@ def main():
 
         if len(segments_list) == 0:
             st.warning(
-                f"No segments within {max_distance:.0f} miles of {location_name}. "
-                "Try increasing the distance filter."
+                f"No segments within {SIMULATOR_RADIUS_MI} miles of {location_name}. "
+                "Try selecting a different region."
             )
             return
 
