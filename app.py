@@ -270,8 +270,14 @@ except ImportError:
 @st.cache_data(ttl=10800, show_spinner=False)
 def _fetch_forecast_cached(api_key: str, lat: float, lon: float, _date_key: str):
     """
-    Cached weather forecast fetch.  _date_key is today's date string so
-    the cache auto-invalidates once a day (or every 30 min via ttl).
+    Cached weather forecast fetch. _date_key is today's date string so the
+    cache auto-invalidates once a day regardless of TTL.
+
+    TTL is 3 hours (10800s). The OpenWeatherMap /forecast endpoint returns
+    data in 3-hour increments and the underlying model updates every 3-6
+    hours, so caching shorter than 3 hrs costs API calls without improving
+    accuracy. Change to 3600 (1 hr) if you need fresher "right now"
+    conditions for the current hour display.
     """
     weather_api = WeatherForecast(api_key)
     return weather_api.get_forecast(lat, lon)
@@ -721,6 +727,146 @@ def calculate_wind_angle(segment_bearing: float, wind_direction: float) -> tuple
     return angle, tailwind_pct
 
 
+# =============================================================
+# Polyline-aware tailwind calculation
+# =============================================================
+# The straight-line start→end bearing misrepresents curvy or U-shaped
+# segments. These helpers walk the cleaned polyline and compute a
+# distance-weighted average tailwind %, correctly accounting for each
+# part of the ride facing its own wind direction.
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_segment_polyline_points(db_path: str, segment_id: int) -> list:
+    """
+    Load the cleaned polyline points for a segment as [(lat, lon), ...].
+    Cached for 1 hour since polyline data is static. Returns empty list
+    if segment has no cleaned points (caller should fall back to
+    start/end bearing).
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT lat, lon FROM clean_seg_points WHERE segment_id = ? ORDER BY seq",
+            (segment_id,),
+        )
+        pts = cur.fetchall()
+        conn.close()
+        return pts
+    except Exception:
+        return []
+
+
+def polyline_tailwind_pct(polyline_points: list, wind_direction: float) -> float:
+    """
+    Compute distance-weighted tailwind % across a polyline.
+
+    For each consecutive pair of points:
+      1. Compute the local bearing
+      2. Compute local tailwind % using the same cosine formula as
+         calculate_wind_angle
+      3. Weight by the segment-piece distance
+
+    Then average: sum(tailwind_pct_i * distance_i) / sum(distance_i).
+
+    This correctly handles U-shaped, curvy, or looping segments where
+    the straight-line start→end bearing is misleading.
+
+    Args:
+        polyline_points: [(lat, lon), ...] in order
+        wind_direction: degrees, meteorological convention (where wind comes FROM)
+
+    Returns:
+        Distance-weighted tailwind % (0-100). Returns 50.0 if fewer than
+        2 points (pure crosswind as neutral default).
+    """
+    if len(polyline_points) < 2:
+        return 50.0
+
+    weighted_sum = 0.0
+    total_distance = 0.0
+
+    for i in range(len(polyline_points) - 1):
+        lat1, lon1 = polyline_points[i]
+        lat2, lon2 = polyline_points[i + 1]
+
+        # Haversine distance (km, accurate enough for segment pieces)
+        lat1_r, lat2_r = math.radians(lat1), math.radians(lat2)
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = (
+            math.sin(dlat / 2) ** 2
+            + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2) ** 2
+        )
+        piece_dist = 6371.0 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        if piece_dist < 1e-6:
+            continue  # Skip near-duplicate points
+
+        # Local bearing using the same formula as calculate_segment_bearing
+        x = math.sin(dlon) * math.cos(lat2_r)
+        y = math.cos(lat1_r) * math.sin(lat2_r) - math.sin(lat1_r) * math.cos(
+            lat2_r
+        ) * math.cos(dlon)
+        local_bearing = (math.degrees(math.atan2(x, y)) + 360) % 360
+
+        # Tailwind for this piece
+        angle = abs(local_bearing - wind_direction)
+        if angle > 180:
+            angle = 360 - angle
+        piece_tailwind_pct = (1 - math.cos(math.radians(angle))) / 2 * 100
+
+        weighted_sum += piece_tailwind_pct * piece_dist
+        total_distance += piece_dist
+
+    if total_distance == 0:
+        return 50.0
+
+    return weighted_sum / total_distance
+
+
+def segment_tailwind_pct(
+    segment_id: int,
+    start_lat: float,
+    start_lng: float,
+    end_lat: float,
+    end_lng: float,
+    wind_direction: float,
+    db_path: str = "segments.db",
+) -> tuple:
+    """
+    Primary tailwind calculation for all app tabs. Uses the polyline if
+    available (distance-weighted across all segments of the ride), falls
+    back to the straight-line start→end bearing if not.
+
+    Returns (representative_angle, tailwind_pct) to match the existing
+    calculate_wind_angle() signature so callers can drop-in replace it.
+    representative_angle is the straight-line angle (kept for backward
+    compatibility with UI text); tailwind_pct is the polyline-weighted
+    value when available.
+    """
+    # Straight-line bearing — always compute for the returned angle
+    straight_bearing = calculate_segment_bearing(start_lat, start_lng, end_lat, end_lng)
+    straight_angle = abs(straight_bearing - wind_direction)
+    if straight_angle > 180:
+        straight_angle = 360 - straight_angle
+
+    # Try polyline
+    try:
+        polyline_pts = _get_segment_polyline_points(db_path, int(segment_id))
+    except Exception:
+        polyline_pts = []
+
+    if len(polyline_pts) >= 2:
+        tailwind_pct = polyline_tailwind_pct(polyline_pts, wind_direction)
+    else:
+        # Fallback to straight-line
+        tailwind_pct = (1 - math.cos(math.radians(straight_angle))) / 2 * 100
+
+    return straight_angle, tailwind_pct
+
+
 def find_tailwind_segments(
     segments_df: pd.DataFrame,
     athlete: AthleteProfile,
@@ -788,7 +934,17 @@ def find_tailwind_segments(
         segment_bearing = calculate_segment_bearing(
             seg["start_lat"], seg["start_lng"], seg["end_lat"], seg["end_lng"]
         )
-        wind_angle, tailwind_pct = calculate_wind_angle(segment_bearing, wind_direction)
+        # Polyline-aware tailwind % (accounts for curvy/U-shaped segments).
+        # Returns straight-line angle + polyline-weighted tailwind pct.
+        wind_angle, tailwind_pct = segment_tailwind_pct(
+            int(seg["id"]),
+            seg["start_lat"],
+            seg["start_lng"],
+            seg["end_lat"],
+            seg["end_lng"],
+            wind_direction,
+            db_path,
+        )
 
         if tailwind_pct < min_tailwind_pct:
             continue
@@ -2395,10 +2551,18 @@ def main():
                     filtered_1b["athlete_count"].fillna(0) >= min_athletes
                 ]
             for _, seg in filtered_1b.iterrows():
-                bearing = calculate_segment_bearing(
-                    seg["start_lat"], seg["start_lng"], seg["end_lat"], seg["end_lng"]
+                # Track (segment_id, start/end coords) so we can do polyline-
+                # aware tailwind per day later. The polyline is cached so
+                # repeated lookups are cheap.
+                seg_bearings.append(
+                    {
+                        "id": int(seg["id"]),
+                        "start_lat": seg["start_lat"],
+                        "start_lng": seg["start_lng"],
+                        "end_lat": seg["end_lat"],
+                        "end_lng": seg["end_lng"],
+                    }
                 )
-                seg_bearings.append(bearing)
 
         # On mobile, show a 5-day forecast (last 3 days of the 8-day forecast
         # aren't as actionable and make the sidebar-column table long).
@@ -2440,14 +2604,23 @@ def main():
                 wind_str = f"{wind_speed_ms * 2.237:.0f} mph {wind_cardinal}"
 
             # Wind opportunity score:
-            # For each segment, compute tailwind_pct for this day's wind direction.
+            # For each segment, compute polyline-weighted tailwind_pct for
+            # this day's wind direction.
             # Score = wind_speed * mean(top 10 tailwind percentages) / 100
             # High score = windy day where many segments get strong tailwinds
             wind_opp_score = 0
             if seg_bearings and wind_speed_ms > 0.5:
                 tailwind_pcts = []
-                for bearing in seg_bearings:
-                    _, tw_pct = calculate_wind_angle(bearing, closest_fc["wind_deg"])
+                for seg_info in seg_bearings:
+                    _, tw_pct = segment_tailwind_pct(
+                        seg_info["id"],
+                        seg_info["start_lat"],
+                        seg_info["start_lng"],
+                        seg_info["end_lat"],
+                        seg_info["end_lng"],
+                        closest_fc["wind_deg"],
+                        DB_PATH,
+                    )
                     if tw_pct >= 50:  # Only count tailwind segments
                         tailwind_pcts.append(tw_pct)
                 if tailwind_pcts:
@@ -3130,8 +3303,15 @@ def main():
                             seg["end_lat"],
                             seg["end_lng"],
                         )
-                        wind_angle, tailwind_pct = calculate_wind_angle(
-                            seg_bearing, today_fc["wind_deg"]
+                        # Polyline-aware tailwind % (accounts for curvy/U shapes)
+                        wind_angle, tailwind_pct = segment_tailwind_pct(
+                            int(seg["id"]),
+                            seg["start_lat"],
+                            seg["start_lng"],
+                            seg["end_lat"],
+                            seg["end_lng"],
+                            today_fc["wind_deg"],
+                            DB_PATH,
                         )
 
                         segment_dict = {
@@ -4323,6 +4503,8 @@ def main():
                             with st.status(
                                 "Computing optimized 7-day forecast...", expanded=False
                             ) as _opt_status:
+                                # Straight-line bearing is still used for the
+                                # displayed "segment direction" metric below.
                                 seg_bearing_opt = calculate_segment_bearing(
                                     segment_data["start_lat"],
                                     segment_data["start_lng"],
@@ -4353,9 +4535,18 @@ def main():
                                         ),
                                     )
 
+                                    # Polyline-aware tailwind % (accounts for
+                                    # curvy/U segments where start→end bearing
+                                    # misrepresents the actual ride direction).
                                     wind_angle_fc, tailwind_pct_fc = (
-                                        calculate_wind_angle(
-                                            seg_bearing_opt, closest_fc["wind_deg"]
+                                        segment_tailwind_pct(
+                                            int(segment_id),
+                                            segment_data["start_lat"],
+                                            segment_data["start_lng"],
+                                            segment_data["end_lat"],
+                                            segment_data["end_lng"],
+                                            closest_fc["wind_deg"],
+                                            DB_PATH,
                                         )
                                     )
 
@@ -4453,6 +4644,7 @@ def main():
                 unsafe_allow_html=True,
             )
 
+        # Straight-line bearing — used for the segment direction display.
         seg_bearing = calculate_segment_bearing(
             segment_data["start_lat"],
             segment_data["start_lng"],
@@ -4477,8 +4669,15 @@ def main():
                 key=lambda f: abs((f["datetime"] - afternoon_time).total_seconds()),
             )
 
-            wind_angle, tailwind_pct = calculate_wind_angle(
-                seg_bearing, closest_fc["wind_deg"]
+            # Polyline-aware tailwind % (distance-weighted across the ride).
+            wind_angle, tailwind_pct = segment_tailwind_pct(
+                int(segment_id),
+                segment_data["start_lat"],
+                segment_data["start_lng"],
+                segment_data["end_lat"],
+                segment_data["end_lng"],
+                closest_fc["wind_deg"],
+                DB_PATH,
             )
 
             day_weather = {
