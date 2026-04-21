@@ -362,6 +362,99 @@ def simulate_segment(
 
 
 # ============================================================
+# Even-Power Calibration: find power that targets a W' depletion %
+# ============================================================
+def find_even_power_for_target_exhaustion(
+    sections: List[SegmentSection],
+    athlete: Athlete,
+    entrance_speed_mph: float = 20.0,
+    air_density: float = AIR_DENSITY_DEFAULT,
+    wind_speed_ms: float = 0.0,
+    target_exhaustion: float = 97.5,
+    tolerance: float = 1.0,
+    max_iter: int = 12,
+    dt: float = 0.5,
+) -> Tuple[float, Dict]:
+    """
+    Binary-search the constant power that depletes W' to ~target_exhaustion%.
+
+    The plain max_power_for_duration() formula assumes average steady conditions,
+    so on variable-gradient terrain it often under-uses W' (rider finishes with
+    unspent capacity). This routine pushes the even-power baseline up until the
+    simulated max exhaustion reaches the same ceiling the optimizer aims for,
+    giving a fair apples-to-apples comparison.
+
+    Returns (calibrated_power_watts, final_sim_dict).
+    """
+    n = len(sections)
+    total_dist = segment_total_distance(sections)
+
+    # Seed with the standard formula estimate — this is our lower bound
+    est_t = max(30, total_dist / 6.0)
+    p_seed = athlete.max_power_for_duration(est_t)
+
+    # Refine seed using a first sim
+    seed_sim = simulate_segment(
+        sections,
+        [p_seed] * n,
+        athlete,
+        entrance_speed_mph,
+        air_density,
+        dt=dt,
+        wind_speed_ms=wind_speed_ms,
+    )
+    p_seed = athlete.max_power_for_duration(seed_sim["total_time"])
+    seed_sim = simulate_segment(
+        sections,
+        [p_seed] * n,
+        athlete,
+        entrance_speed_mph,
+        air_density,
+        dt=dt,
+        wind_speed_ms=wind_speed_ms,
+    )
+
+    # Bracket: low = CP * 0.7 (safely sub-critical), high = p_seed * 1.5 (well above)
+    p_lo = athlete.cp * 0.7
+    p_hi = p_seed * 1.5
+    best_sim = seed_sim
+    best_power = p_seed
+    best_diff = abs(max(seed_sim["exhaustion_profile"]) - target_exhaustion)
+
+    for _ in range(max_iter):
+        p_mid = (p_lo + p_hi) / 2
+        sim = simulate_segment(
+            sections,
+            [p_mid] * n,
+            athlete,
+            entrance_speed_mph,
+            air_density,
+            dt=dt,
+            wind_speed_ms=wind_speed_ms,
+        )
+        max_E = max(sim["exhaustion_profile"])
+        diff = abs(max_E - target_exhaustion)
+
+        # Track the best hit we've seen so far
+        if diff < best_diff:
+            best_diff = diff
+            best_power = p_mid
+            best_sim = sim
+
+        # Converged
+        if diff <= tolerance:
+            break
+
+        # Standard bisection
+        if max_E < target_exhaustion:
+            p_lo = p_mid  # under-exhausted → need more power
+        else:
+            p_hi = p_mid  # over-exhausted → need less power
+
+    return best_power, best_sim
+
+
+# ============================================================
 # Optimizer: Find Best Power Allocation
 # ============================================================
 def optimize_power_profile(
@@ -400,10 +493,23 @@ def optimize_power_profile(
         dt=0.5,
         wind_speed_ms=wind_speed_ms,
     )
-    even_power = athlete.max_power_for_duration(even_sim_init["total_time"])
+
+    # Calibrate the even-power baseline to target ~97.5% W' depletion,
+    # same ceiling the optimizer aims for. Without this, constant-power
+    # runs on rolling terrain typically leave W' unspent, making the
+    # optimizer's improvement look artificially large.
+    even_power, even_sim_ref = find_even_power_for_target_exhaustion(
+        sections,
+        athlete,
+        entrance_speed_mph=entrance_speed_mph,
+        air_density=air_density,
+        wind_speed_ms=wind_speed_ms,
+        target_exhaustion=97.5,
+        tolerance=1.0,
+    )
 
     # Adaptive timestep based on actual duration AND section count
-    actual_est = even_sim_init["total_time"]
+    actual_est = even_sim_ref["total_time"]
     avg_section_time = actual_est / max(n, 1)
     # At least 300 total steps, AND at least 40 steps per section
     dt_from_total = actual_est / 300
@@ -411,6 +517,7 @@ def optimize_power_profile(
     opt_dt = max(0.25, min(0.75, min(dt_from_total, dt_from_sections)))
     search_dt = opt_dt
 
+    # Re-run even sim at refined dt so timing is comparable to optimizer's final sim
     even_sim_ref = simulate_segment(
         sections,
         [even_power] * n,
@@ -534,39 +641,25 @@ def simulate_flat_equivalent(
 ) -> Dict:
     """
     Simulate the same total distance at the average gradient with a single
-    constant power (athlete's sustainable power for the estimated duration).
-    This is the "naive" baseline to compare against variable pacing.
+    constant power calibrated to target ~97.5% W' depletion — the same
+    ceiling the optimizer aims for. This is the "naive" baseline to compare
+    against variable pacing, on an even footing for effort expenditure.
     """
     total_dist = segment_total_distance(sections)
     avg_grade = segment_avg_grade(sections)
 
-    # Create a single-section segment
+    # Create a single-section segment at the avg grade
     flat_section = [SegmentSection(avg_grade, total_dist / MILES_TO_METERS)]
 
-    # Estimate duration, pick sustainable power
-    est_time = max(30, total_dist / 6.0)
-    power = athlete.max_power_for_duration(est_time)
-
-    # Simulate
-    sim = simulate_segment(
+    # Calibrate constant power to hit ~97.5% W' depletion
+    refined_power, sim = find_even_power_for_target_exhaustion(
         flat_section,
-        [power],
         athlete,
-        entrance_speed_mph,
-        air_density,
+        entrance_speed_mph=entrance_speed_mph,
+        air_density=air_density,
         wind_speed_ms=wind_speed_ms,
-    )
-
-    # Refine: re-estimate power for actual duration
-    actual_time = sim["total_time"]
-    refined_power = athlete.max_power_for_duration(actual_time)
-    sim = simulate_segment(
-        flat_section,
-        [refined_power],
-        athlete,
-        entrance_speed_mph,
-        air_density,
-        wind_speed_ms=wind_speed_ms,
+        target_exhaustion=97.5,
+        tolerance=1.0,
     )
     sim["constant_power"] = refined_power
     return sim

@@ -219,6 +219,7 @@ from Segment_Optimizer import (
     simulate_flat_equivalent,
     segment_total_distance,
     segment_avg_grade,
+    find_even_power_for_target_exhaustion,
     MILES_TO_METERS,
 )
 
@@ -266,7 +267,7 @@ except ImportError:
 # =============================
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=10800, show_spinner=False)
 def _fetch_forecast_cached(api_key: str, lat: float, lon: float, _date_key: str):
     """
     Cached weather forecast fetch.  _date_key is today's date string so
@@ -1358,8 +1359,13 @@ def log_location_request(
     nearest_region: str,
     distance_miles: float,
     user_id: str = None,
+    is_supported: bool = None,
+    geocode_success: bool = True,
 ):
-    """Log an unsupported location request to Supabase."""
+    """
+    Log a location search to Supabase. Fires on EVERY search — successful
+    geocode (supported or unsupported region) and failed geocode attempts.
+    """
     import requests as _requests
 
     try:
@@ -1375,11 +1381,163 @@ def log_location_request(
                 "nearest_region": nearest_region,
                 "distance_miles": distance_miles,
                 "user_id": user_id,
+                "is_supported": is_supported,
+                "geocode_success": geocode_success,
             },
             headers=headers,
         )
     except Exception:
         pass
+
+
+# =============================
+# Usage Analytics (Supabase)
+# =============================
+import uuid as _uuid
+
+
+def _get_session_id() -> str:
+    """Generate/retrieve a stable session ID for this browser session."""
+    if "_session_id" not in st.session_state:
+        st.session_state["_session_id"] = str(_uuid.uuid4())
+    return st.session_state["_session_id"]
+
+
+def _post_supabase(table: str, payload: dict, on_conflict: str = None):
+    """Fire-and-forget POST to a Supabase table. Silently swallows errors."""
+    import requests as _requests
+
+    try:
+        headers, url = _supabase_rest_headers()
+        headers["Prefer"] = "return=minimal"
+        endpoint = f"{url}/rest/v1/{table}"
+        if on_conflict:
+            # Upsert: if row exists with matching conflict columns, merge
+            endpoint += f"?on_conflict={on_conflict}"
+            headers["Prefer"] = "return=minimal,resolution=merge-duplicates"
+        _requests.post(endpoint, json=payload, headers=headers, timeout=2)
+    except Exception:
+        pass
+
+
+def _patch_supabase(table: str, payload: dict, filter_str: str):
+    """Fire-and-forget PATCH to update rows matching filter_str."""
+    import requests as _requests
+
+    try:
+        headers, url = _supabase_rest_headers()
+        headers["Prefer"] = "return=minimal"
+        _requests.patch(
+            f"{url}/rest/v1/{table}?{filter_str}",
+            json=payload,
+            headers=headers,
+            timeout=2,
+        )
+    except Exception:
+        pass
+
+
+def log_session_heartbeat(user, is_mobile: bool, selected_region: str = None):
+    """
+    Upsert the current session row. Called once per rerun from main() —
+    creates the row on first visit, updates last_seen_at after that.
+    Session duration = last_seen_at - started_at.
+    """
+    sid = _get_session_id()
+    user_id = str(user.id) if user else None
+    is_signed_in = user is not None
+
+    # First rerun of session: insert with started_at
+    if not st.session_state.get("_session_logged"):
+        _post_supabase(
+            "app_sessions",
+            {
+                "session_id": sid,
+                "user_id": user_id,
+                "is_mobile": is_mobile,
+                "is_signed_in": is_signed_in,
+                "selected_region": selected_region,
+            },
+            on_conflict="session_id",
+        )
+        st.session_state["_session_logged"] = True
+    else:
+        # Subsequent reruns: bump last_seen_at (and region if changed)
+        payload = {"last_seen_at": "now()"}
+        if selected_region:
+            payload["selected_region"] = selected_region
+        _patch_supabase("app_sessions", payload, f"session_id=eq.{sid}")
+
+
+def log_tab_view(tab_name: str, user):
+    """
+    Log first view of a tab this session (once per session, deduped).
+    Also tracks per-tab interaction count (flushed to DB every 5 reruns
+    to cut write chatter).
+    """
+    sid = _get_session_id()
+    user_id = str(user.id) if user else None
+
+    # First time this tab is viewed this session: record tab_view row
+    seen_key = f"_tab_viewed_{tab_name}"
+    if not st.session_state.get(seen_key):
+        _post_supabase(
+            "tab_views",
+            {"session_id": sid, "user_id": user_id, "tab_name": tab_name},
+            on_conflict="session_id,tab_name",
+        )
+        st.session_state[seen_key] = True
+
+    # Always increment interaction counter. Flush every 5 interactions.
+    count_key = f"_tab_count_{tab_name}"
+    pending_key = f"_tab_pending_{tab_name}"
+    st.session_state[count_key] = st.session_state.get(count_key, 0) + 1
+    st.session_state[pending_key] = st.session_state.get(pending_key, 0) + 1
+
+    if st.session_state[pending_key] >= 5:
+        total = st.session_state[count_key]
+        _post_supabase(
+            "tab_interactions",
+            {
+                "session_id": sid,
+                "tab_name": tab_name,
+                "interaction_count": total,
+                "last_updated": "now()",
+            },
+            on_conflict="session_id,tab_name",
+        )
+        st.session_state[pending_key] = 0
+
+
+def log_optimization_run(segment_id: int, segment_name: str, context: str, user):
+    """Log a single optimize_power_profile() call."""
+    sid = _get_session_id()
+    user_id = str(user.id) if user else None
+    _post_supabase(
+        "optimization_runs",
+        {
+            "session_id": sid,
+            "user_id": user_id,
+            "segment_id": segment_id,
+            "segment_name": segment_name,
+            "context": context,
+        },
+    )
+
+
+def log_favorite_event(segment_id: int, action: str, user):
+    """Log add/remove of a segment from favorites. action = 'add' | 'remove'."""
+    sid = _get_session_id()
+    user_id = str(user.id) if user else None
+    _post_supabase(
+        "favorite_events",
+        {
+            "session_id": sid,
+            "user_id": user_id,
+            "segment_id": segment_id,
+            "action": action,
+        },
+    )
 
 
 # =============================
@@ -1656,6 +1814,8 @@ def main():
         # Geocode when user clicks search or presses Enter
         if search_clicked and location_input.strip():
             geo = geocode_location(api_key, location_input.strip())
+            user_id = str(user.id) if user else None
+
             if geo:
                 st.session_state["_user_location_input"] = location_input.strip()
                 resolved_name = (
@@ -1669,24 +1829,28 @@ def main():
                 nearest_region, nearest_dist = find_nearest_region(
                     geo["lat"], geo["lon"]
                 )
+                is_supported = nearest_dist <= 10
 
-                if nearest_dist <= 10:
+                # Log EVERY successful geocode (supported or not)
+                log_location_request(
+                    location_input.strip(),
+                    resolved_name,
+                    geo["lat"],
+                    geo["lon"],
+                    nearest_region,
+                    nearest_dist,
+                    user_id,
+                    is_supported=is_supported,
+                    geocode_success=True,
+                )
+
+                if is_supported:
                     st.session_state["_auto_region"] = nearest_region
                     st.session_state["_location_msg"] = (
                         "success",
                         f"✅ **{resolved_name}** matched to **{nearest_region}** region",
                     )
                 else:
-                    user_id = str(user.id) if user else None
-                    log_location_request(
-                        location_input.strip(),
-                        resolved_name,
-                        geo["lat"],
-                        geo["lon"],
-                        nearest_region,
-                        nearest_dist,
-                        user_id,
-                    )
                     st.session_state["_auto_region"] = nearest_region
                     st.session_state["_location_msg"] = (
                         "unsupported",
@@ -1698,6 +1862,19 @@ def main():
                     )
                 st.rerun()
             else:
+                # Geocode failed — still log the attempt so we can see what
+                # users are typing that we can't resolve
+                log_location_request(
+                    location_input.strip(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    user_id,
+                    is_supported=False,
+                    geocode_success=False,
+                )
                 st.session_state["_location_msg"] = (
                     "error",
                     "❌ Could not find that location. Try 'City, State' format (e.g. Denver, CO).",
@@ -1983,6 +2160,9 @@ def main():
         f"⚡ {power_1}W (1min) → {power_20}W (20min) | FTP≈{ftp:.0f}W | {weight_kg}kg ({ftp/weight_kg:.2f} W/kg)"
     )
 
+    # Session heartbeat — logs first visit, updates last_seen_at on reruns
+    log_session_heartbeat(user, IS_MOBILE, selected_region)
+
     # Tabs — add Favorites tab if signed in
     if _is_signed_in:
         tab1b, tab_favs, tab2, tab4, tab5, tab6 = st.tabs(
@@ -2066,6 +2246,7 @@ def main():
     # TAB 1b: Daily Planner
     # =============================
     with tab1b:
+        log_tab_view("daily_planner", user)
         # Custom CSS for this tab — better contrast and styled cards
         st.markdown(
             """
@@ -2831,6 +3012,11 @@ def main():
                             # Toggle if state changed
                             if fav_checked != is_fav:
                                 toggle_favorite(sb, str(user.id), seg_id_fav)
+                                log_favorite_event(
+                                    seg_id_fav,
+                                    "add" if fav_checked else "remove",
+                                    user,
+                                )
                                 st.rerun()
 
                     # Show More button (if more segments available)
@@ -2860,6 +3046,7 @@ def main():
     # =============================
     if tab_favs is not None and user and sb and SUPABASE_AVAILABLE:
         with tab_favs:
+            log_tab_view("favorites", user)
             st.header("⭐ My Favorite Segments")
 
             # Load favorites
@@ -3097,12 +3284,14 @@ def main():
                                 key=f"unfav_{seg_id}",
                             ):
                                 toggle_favorite(sb, str(user.id), seg_id)
+                                log_favorite_event(seg_id, "remove", user)
                                 st.rerun()
 
     # =============================
     # TAB 2: Segment Simulator
     # =============================
     with tab2:
+        log_tab_view("simulator", user)
         st.header("Segment Time Simulator")
 
         # Load only segments within the selected region/distance
@@ -3179,6 +3368,11 @@ def main():
                 )
                 if _t2_fav_checked != _t2_is_fav:
                     toggle_favorite(sb, str(user.id), int(segment_id))
+                    log_favorite_event(
+                        int(segment_id),
+                        "add" if _t2_fav_checked else "remove",
+                        user,
+                    )
                     st.rerun()
 
         # Get KOM/QOM time for this segment (based on Show QOM toggle)
@@ -3847,35 +4041,25 @@ def main():
                             "Running optimizer (this may take a moment)..."
                         ):
                             try:
-                                # Even-power simulation (constant power, variable grade)
-                                est_time_init = (
-                                    segment_total_distance(sections_opt) / 6.0
+                                # Even-power simulation — calibrated to hit
+                                # ~97.5% W' depletion (same ceiling the
+                                # optimizer targets). Without calibration,
+                                # constant power on rolling terrain leaves
+                                # W' unspent and makes the optimizer's gain
+                                # look artificially large.
+                                refined_power_val, even_sim = (
+                                    find_even_power_for_target_exhaustion(
+                                        sections_opt,
+                                        opt_athlete,
+                                        entrance_speed_mph=entrance_speed_t2,
+                                        air_density=air_density_opt,
+                                        wind_speed_ms=effective_headwind_opt,
+                                        target_exhaustion=97.5,
+                                        tolerance=1.0,
+                                    )
                                 )
-                                even_power_val = opt_athlete.max_power_for_duration(
-                                    est_time_init
-                                )
-                                even_powers = [even_power_val] * len(sections_opt)
-
-                                even_sim = optimizer_simulate_segment(
-                                    sections_opt,
-                                    even_powers,
-                                    opt_athlete,
-                                    entrance_speed_mph=entrance_speed_t2,
-                                    air_density=air_density_opt,
-                                    wind_speed_ms=effective_headwind_opt,
-                                )
-                                refined_power_val = opt_athlete.max_power_for_duration(
-                                    even_sim["total_time"]
-                                )
+                                even_power_val = refined_power_val
                                 even_powers = [refined_power_val] * len(sections_opt)
-                                even_sim = optimizer_simulate_segment(
-                                    sections_opt,
-                                    even_powers,
-                                    opt_athlete,
-                                    entrance_speed_mph=entrance_speed_t2,
-                                    air_density=air_density_opt,
-                                    wind_speed_ms=effective_headwind_opt,
-                                )
 
                                 # Optimized pacing
                                 opt_result = optimize_power_profile(
@@ -3885,6 +4069,17 @@ def main():
                                     air_density=air_density_opt,
                                     wind_speed_ms=effective_headwind_opt,
                                 )
+
+                                # Log this optimization run
+                                try:
+                                    log_optimization_run(
+                                        segment_id=int(segment_id),
+                                        segment_name=str(segment_data.get("name", "")),
+                                        context="simulator",
+                                        user=user,
+                                    )
+                                except Exception:
+                                    pass
 
                                 # Re-simulate optimized powers at dt=0.5
                                 # so the display profile has the same point
@@ -4114,6 +4309,17 @@ def main():
                         # Compute optimizer forecast data for the main table
                         # =============================================
                         if "_opt_forecast_data" not in st.session_state:
+                            # Log once per segment-session (not per day)
+                            try:
+                                log_optimization_run(
+                                    segment_id=int(segment_id),
+                                    segment_name=str(segment_data.get("name", "")),
+                                    context="simulator_forecast",
+                                    user=user,
+                                )
+                            except Exception:
+                                pass
+
                             with st.status(
                                 "Computing optimized 7-day forecast...", expanded=False
                             ) as _opt_status:
@@ -4175,37 +4381,19 @@ def main():
                                         "wind_speed_ms"
                                     ] * math.cos(_day_wind_angle_rad)
 
-                                    # Even power time
+                                    # Even power time — calibrated to ~97.5%
+                                    # W' depletion (matches the optimizer ceiling)
                                     try:
-                                        day_even_power = (
-                                            opt_athlete.max_power_for_duration(
-                                                max(
-                                                    30,
-                                                    segment_total_distance(sections_opt)
-                                                    / 6.0,
-                                                )
+                                        day_refined_power, day_even_sim = (
+                                            find_even_power_for_target_exhaustion(
+                                                sections_opt,
+                                                opt_athlete,
+                                                entrance_speed_mph=entrance_speed_t2,
+                                                air_density=day_air_density,
+                                                wind_speed_ms=day_effective_headwind,
+                                                target_exhaustion=97.5,
+                                                tolerance=1.0,
                                             )
-                                        )
-                                        day_even_sim = optimizer_simulate_segment(
-                                            sections_opt,
-                                            [day_even_power] * len(sections_opt),
-                                            opt_athlete,
-                                            entrance_speed_mph=entrance_speed_t2,
-                                            air_density=day_air_density,
-                                            wind_speed_ms=day_effective_headwind,
-                                        )
-                                        day_refined_power = (
-                                            opt_athlete.max_power_for_duration(
-                                                day_even_sim["total_time"]
-                                            )
-                                        )
-                                        day_even_sim = optimizer_simulate_segment(
-                                            sections_opt,
-                                            [day_refined_power] * len(sections_opt),
-                                            opt_athlete,
-                                            entrance_speed_mph=entrance_speed_t2,
-                                            air_density=day_air_density,
-                                            wind_speed_ms=day_effective_headwind,
                                         )
                                         day_time_dynamic = day_even_sim["total_time"]
                                     except Exception:
@@ -4426,6 +4614,7 @@ def main():
         # TAB 4: Segment Requests
         # =============================
     with tab4:
+        log_tab_view("request_segments", user)
         st.header("Request New Segments")
         st.caption(
             "Submit Strava segment IDs to be added to the database. "
@@ -4590,31 +4779,11 @@ def main():
                 proc_df["Requested By"] = proc_df["Requested By"].fillna("—")
                 st.dataframe(proc_df, use_container_width=True, hide_index=True)
 
-        # --- Admin instructions ---
-        with st.expander("🔧 Admin: How to process requests"):
-            st.markdown(
-                """
-            Run this command to process all pending segment requests:
-
-            ```bash
-            python pipeline.py process-requests
-            ```
-
-            Or manually with specific IDs:
-
-            ```bash
-            python pipeline.py full --ids 619307 624537
-            ```
-
-            After processing, run `scraperSel.py` to fetch leaderboard data
-            for the new segments.
-            """
-            )
-
     # =============================
     # TAB 5: Flagged Segments
     # =============================
     with tab5:
+        log_tab_view("excluded_segments", user)
         st.header("Excluded Segments")
         st.caption(
             "Exclude segments from all tabs. "
@@ -4717,6 +4886,7 @@ def main():
     # TAB 6: Feedback
     # =============================
     with tab6:
+        log_tab_view("feedback", user)
         st.header("Feedback")
         st.caption(
             "Found a bug? Have an idea? Let us know. "
