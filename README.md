@@ -1,6 +1,7 @@
 # Segment Predictor
 
 A Streamlit application that predicts cycling segment times on any Strava segment using a physics-based model, real weather forecasts, and a CP/W' fatigue model. It also finds the optimal power-pacing strategy across variable terrain to deliver your fastest possible time.
+https://segment-predict.streamlit.app/
 
 ---
 
